@@ -1,0 +1,31 @@
+# ── Rust / Tauri 构建产物(脚手架自带 + 补充)──
+/target
+/src-tauri/target
+**/*.rs.bk
+
+# ── 前端 ──
+**/node_modules
+/ui/dist
+
+# ── 本机 CARGO_HOME(rsproxy 镜像缓存,勿提交)──
+.cargo-home/
+
+# ── 运行时/诊断文件 ──
+panel.log
+.wv2-test/
+eu.json
+*.log
+
+# ── 编辑器/系统 ──
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── 本地凭据(防误提交)──
+.env
+.env.*
+*.pem
+*.key
+credentials*
