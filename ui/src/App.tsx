@@ -1145,7 +1145,7 @@ export default function App() {
           title="设置 (Ctrl+K)"
           onClick={() => setSettingsOpen(true)}
         >
-          ⚙
+          设置
         </button>
         <div className="win-controls">
           <button onClick={() => appWindow.minimize()} aria-label="minimize">─</button>
@@ -1368,14 +1368,14 @@ export default function App() {
             onClick={() => setTailMode((t) => !t)}
             title="tail 模式:文件追加自动加载,视口跟随底部,激活搜索自动重扫"
           >
-            📡
+            TAIL
           </button>
           <button
             className="theme-toggle"
             onClick={() => setSetting("theme", effectiveTheme === "dark" ? "light" : "dark")}
             title="切换浅色/深色主题(设置中可选跟随系统)"
           >
-            {effectiveTheme === "dark" ? "☀️" : "🌙"}
+            {effectiveTheme === "dark" ? "DARK" : "LIGHT"}
           </button>
         </div>
       )}
