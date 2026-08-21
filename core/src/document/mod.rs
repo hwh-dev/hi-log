@@ -30,6 +30,15 @@ impl Document {
     /// 索引耗时与文件大小成正比(memchr 扫描,约数 GB/s)。需要
     /// "边索引边浏览"时应在后台线程调用(Tauri 壳负责),本函数保持纯粹。
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_with_encoding(path, None)
+    }
+
+    /// 打开文件;`force` 指定时覆盖自动编码检测(设置项"强制编码"用)。
+    /// 注意:编码只影响解码(行文本),行分割始终按 0x0A,与编码无关。
+    pub fn open_with_encoding(
+        path: impl AsRef<Path>,
+        force: Option<Encoding>,
+    ) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
         let size = file.metadata()?.len();
@@ -41,7 +50,7 @@ impl Document {
             Some(unsafe { Mmap::map(&file)? })
         };
         let index = LineIndex::build(mmap.as_deref().unwrap_or(&[]));
-        let encoding = Encoding::detect(mmap.as_deref().unwrap_or(&[]));
+        let encoding = force.unwrap_or_else(|| Encoding::detect(mmap.as_deref().unwrap_or(&[])));
         Ok(Document {
             path,
             mmap,
@@ -205,5 +214,51 @@ mod tests {
             .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
             .collect();
         assert_eq!(got, vec!["one", "two", "three"]);
+    }
+
+    // ── 强制编码(open_with_encoding)──
+
+    #[test]
+    fn open_with_none_equals_auto_detection() {
+        let (_f, doc1) = doc_with(b"hello\nworld\n");
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello\nworld\n").unwrap();
+        f.flush().unwrap();
+        let doc2 = Document::open_with_encoding(f.path(), None).unwrap();
+        assert_eq!(doc1.encoding(), doc2.encoding());
+        assert_eq!(doc1.line_count(), doc2.line_count());
+        assert_eq!(doc1.line_string(0), doc2.line_string(0));
+    }
+
+    #[test]
+    fn force_utf8_overrides_gbk_detection() {
+        // GBK 字节(自动检测判 GBK);强制 UTF-8 打开:编码记录为 UTF-8,
+        // 解码按 lossy 出乱码但不 panic
+        let gbk_bytes = encoding_rs::GBK.encode("中文日志").0.into_owned();
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&gbk_bytes).unwrap();
+        f.flush().unwrap();
+        let doc = Document::open_with_encoding(f.path(), Some(Encoding::Utf8)).unwrap();
+        assert_eq!(doc.encoding(), Encoding::Utf8);
+        let text = doc.line_string(0).unwrap();
+        assert_ne!(text, "中文日志");
+        // 对照:自动检测为 GBK 且正常解码
+        let auto = Document::open(f.path()).unwrap();
+        assert_eq!(auto.encoding(), Encoding::Gbk);
+        assert_eq!(auto.line_string(0).unwrap(), "中文日志");
+    }
+
+    #[test]
+    fn force_utf16_decodes_bomless_utf16() {
+        // UTF-16LE 无 BOM("AB\n" = 42 00 43 00 0A 00);自动检测会误判 GBK
+        let bytes: Vec<u8> = vec![0x41, 0x00, 0x42, 0x00, 0x0A, 0x00];
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&bytes).unwrap();
+        f.flush().unwrap();
+        let auto = Document::open(f.path()).unwrap();
+        assert_ne!(auto.encoding(), Encoding::Utf16Le);
+        let doc = Document::open_with_encoding(f.path(), Some(Encoding::Utf16Le)).unwrap();
+        assert_eq!(doc.encoding(), Encoding::Utf16Le);
+        assert_eq!(doc.line_string(0).unwrap(), "AB");
     }
 }

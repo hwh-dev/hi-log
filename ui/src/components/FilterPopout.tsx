@@ -51,6 +51,12 @@ export default function FilterPopout() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; lineNo: number } | null>(null);
   const [promptCfg, setPromptCfg] = useState<PromptConfig | null>(null);
   const fileIdRef = useRef<string | null>(null);
+  /** 文件总行数(上下文 ±N 展开上限;随 filter_snapshot 下发) */
+  const fileLinesRef = useRef(0);
+  // 命中累积缓冲:80ms 节流合并 setState(主窗口转发不节流,
+  // 高命中时逐 chunk 渲染在低端 Linux 上会掉帧/卡顿)
+  const pendingHitsRef = useRef<{ search_id: number; line_no: number; ranges: [number, number][] }[]>([]);
+  const flushTimerRef = useRef<number | null>(null);
 
   // 挂载后通知主窗口回发搜索快照
   useEffect(() => {
@@ -99,15 +105,39 @@ export default function FilterPopout() {
     }
   }, []);
 
+  const flushHits = useCallback(() => {
+    const batch = pendingHitsRef.current;
+    pendingHitsRef.current = [];
+    if (batch.length === 0) return;
+    // 按会话分组,一次 setState 合并全部残留命中
+    const bySid = new Map<number, HitPayload[]>();
+    for (const h of batch) {
+      const list = bySid.get(h.search_id);
+      if (list) list.push(h);
+      else bySid.set(h.search_id, [h]);
+    }
+    setSessions((prev) =>
+      prev.map((s) => {
+        const hits = bySid.get(s.id);
+        if (!hits) return s;
+        const next = { ...s.highlightMap };
+        for (const h of hits) next[h.line_no] = h.ranges;
+        return { ...s, highlightMap: next, hitCount: s.hitCount + hits.length };
+      }),
+    );
+  }, []);
+
   // 主窗口快照 + 增量转发(事件均带 search_id,只更新对应会话)
   useEffect(() => {
     const un: Array<() => void> = [];
     listen<{
       fileId: string;
+      lines?: number;
       sessions: SearchSession[];
       activeId: number | null;
     }>("filter_snapshot", (e) => {
       fileIdRef.current = e.payload.fileId;
+      fileLinesRef.current = e.payload.lines ?? 0;
       setSessions(e.payload.sessions);
       setActiveId(e.payload.activeId);
       void loadMarks(e.payload.fileId);
@@ -137,17 +167,15 @@ export default function FilterPopout() {
     ).then((f) => un.push(f));
 
     listen<SearchChunkPayload>("search_chunk_fwd", (e) => {
+      // 80ms 节流合并(与主窗口 flushHits 同模式):主窗口转发不节流,
+      // 高命中时逐 chunk setState 在低端 Linux 上会掉帧/卡顿
       const sid = e.payload.search_id;
-      const hits = e.payload.hits;
-      // 直接合并(独立窗口命中通常较少;主窗口已有节流)
-      setSessions((prev) =>
-        prev.map((s) => {
-          if (s.id !== sid) return s;
-          const next = { ...s.highlightMap };
-          for (const h of hits) next[h.line_no] = h.ranges;
-          return { ...s, highlightMap: next, hitCount: s.hitCount + hits.length };
-        }),
+      pendingHitsRef.current.push(
+        ...e.payload.hits.map((h) => ({ search_id: sid, line_no: h.line_no, ranges: h.ranges })),
       );
+      if (flushTimerRef.current === null) {
+        flushTimerRef.current = window.setTimeout(flushHits, 80);
+      }
     }).then((f) => un.push(f));
 
     listen<SearchProgressPayload>("search_progress_fwd", (e) => {
@@ -159,6 +187,12 @@ export default function FilterPopout() {
 
     listen<SearchDonePayload>("search_done_fwd", (e) => {
       const sid = e.payload.search_id;
+      // 结束前把残余缓冲立即合并,保证最终高亮完整(同主窗口 search_done)
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      flushHits();
       setSessions((prev) =>
         prev.map((s) =>
           s.id === sid
@@ -189,9 +223,10 @@ export default function FilterPopout() {
     }).then((f) => un.push(f));
 
     return () => {
+      if (flushTimerRef.current !== null) clearTimeout(flushTimerRef.current);
       for (const fn of un) fn();
     };
-  }, [loadMarks]);
+  }, [flushHits, loadMarks]);
 
   // 标记 / 固定变更广播 → 重拉
   useEffect(() => {
@@ -350,6 +385,7 @@ export default function FilterPopout() {
           onContextMenu={(lineNo, x, y) => setCtxMenu({ lineNo, x, y })}
           hitCount={active?.hitCount ?? 0}
           truncated={active?.truncated ?? false}
+          lineCount={fileLinesRef.current}
         />
       </div>
       {ctxMenu && (() => {

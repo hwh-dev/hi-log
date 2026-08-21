@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import LogView, { LogViewHandle } from "./components/LogView";
 import SearchBar from "./components/SearchBar";
@@ -12,9 +13,23 @@ import SnapshotsPanel from "./components/SnapshotsPanel";
 import ContextMenu from "./components/ContextMenu";
 import PromptModal, { type PromptConfig } from "./components/PromptModal";
 import ConfirmModal from "./components/ConfirmModal";
+import SettingsModal from "./components/SettingsModal";
+import { registerCommand, initCommandDispatcher } from "./utils/commands";
 import type { Update } from "@tauri-apps/plugin-updater";
 import type { Mark } from "./utils/palette";
 import { loadSnapshots, saveSnapshots, type Snapshot } from "./utils/snapshots";
+import {
+  getSettings,
+  setSetting,
+  useSettings,
+  resolveTheme,
+  systemDarkMQ,
+  loadRecentFiles,
+  recordRecentFile,
+  saveLastFile,
+  loadLastFile,
+  clearLastFile,
+} from "./utils/settings";
 
 interface FileMeta {
   id: string;
@@ -80,24 +95,8 @@ interface CtxMenuState {
 const appWindow = getCurrentWindow();
 const webviewWindow = getCurrentWebviewWindow();
 
-const RECENT_KEY = "hi-log.recent-files";
-const LAST_KEY = "hi-log.last-file";
-const THEME_KEY = "hi-log.theme";
-const FILTER_H = "hi-log.filter-height";
-const SIDEBAR_W = "hi-log.sidebar-width";
-const MAX_RECENT = 10;
 /** 并存会话上限(超限丢弃最旧;高命中会话各占数十 MB,必须设上限) */
 const MAX_SESSIONS = 8;
-
-type Theme = "dark" | "light";
-
-function loadRecent(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
-}
 
 export default function App() {
   const [fileMeta, setFileMeta] = useState<FileMeta | null>(null);
@@ -105,21 +104,17 @@ export default function App() {
   const [lineCache, setLineCache] = useState<LineCache>({});
   const [statusText, setStatusText] = useState("");
   const [dropActive, setDropActive] = useState(false);
-  const [recentFiles, setRecentFiles] = useState<string[]>(loadRecent);
+  const [recentFiles, setRecentFiles] = useState<string[]>(loadRecentFiles);
 
-  // ── theme ──
-  const [theme, setTheme] = useState<Theme>(() =>
-    localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark",
-  );
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
+  // ── theme(设置层管理;状态栏按钮只做快捷切换,可设"跟随系统")──
+  const theme = useSettings((s) => s.theme);
+  const effectiveTheme = resolveTheme(theme, systemDarkMQ?.matches ?? false);
 
   // ── search state ──
   const [query, setQuery] = useState("");
-  const [regex, setRegex] = useState(false);
-  const [caseSensitive, setCaseSensitive] = useState(false);
+  // 默认选项从设置初始化(仅初始生效;历史条目 applyQuery 仍显式传选项)
+  const [regex, setRegex] = useState(() => getSettings().regexDefault);
+  const [caseSensitive, setCaseSensitive] = useState(() => getSettings().caseDefault);
   /** 搜索会话列表(最新在前,多会话并存);渲染用派生值见下 */
   const [sessions, setSessions] = useState<SearchSession[]>([]);
   /** 当前激活会话 id(高亮/命中列表跟随) */
@@ -150,6 +145,11 @@ export default function App() {
   sessionsRef.current = sessions;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  /** 弹窗是否打开(ref 镜像;监听闭包据此门控 popout 事件转发,见 openPanel) */
+  const popoutOpenRef = useRef<{ filter: boolean; sidebar: boolean }>({
+    filter: false,
+    sidebar: false,
+  });
 
   // ── 派生:激活会话 / 运行中会话(驱动 LogView 高亮与 SearchBar 状态)──
   const activeSession = sessions.find((s) => s.id === activeId) ?? sessions[0] ?? null;
@@ -164,6 +164,9 @@ export default function App() {
     () => Object.keys(activeHighlightMap).map(Number),
     [activeHighlightMap],
   );
+  // 命中行镜像(F6/Shift+F6 跳转用,稳定回调无需把 hitLines 放进依赖)
+  const hitLinesRef = useRef(hitLines);
+  hitLinesRef.current = hitLines;
 
   // ── marks state(仅用于日志行着色与右键,侧栏不再列示)──
   const [marks, setMarks] = useState<MarkMap>({});
@@ -241,23 +244,17 @@ export default function App() {
   );
 
   const logViewRef = useRef<LogViewHandle>(null);
+  /** 搜索输入框引用(Ctrl+F 聚焦用) */
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   // 稳定引用(useCallback):LogView 已 memo,内联箭头会让 memo 失效
   const handleLogContextMenu = useCallback((lineNo: number, x: number, y: number) => {
     setCtxMenu({ lineNo, x, y });
   }, []);
 
-  // ── 面板尺寸(拖拽调整,localStorage 记忆)──
-  const [filterHeight, setFilterHeight] = useState(() => {
-    const v = Number(localStorage.getItem(FILTER_H));
-    return Number.isFinite(v) && v >= 60 ? v : 220;
-  });
-  const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const v = Number(localStorage.getItem(SIDEBAR_W));
-    return Number.isFinite(v) && v >= 160 ? v : 230;
-  });
-  useEffect(() => localStorage.setItem(FILTER_H, String(filterHeight)), [filterHeight]);
-  useEffect(() => localStorage.setItem(SIDEBAR_W, String(sidebarWidth)), [sidebarWidth]);
+  // ── 面板尺寸(拖拽调整,设置层持久化;静默写不广播)──
+  const filterHeight = useSettings((s) => s.filterHeight);
+  const sidebarWidth = useSettings((s) => s.sidebarWidth);
   const filterHeightRef = useRef(filterHeight);
   filterHeightRef.current = filterHeight;
   const sidebarWidthRef = useRef(sidebarWidth);
@@ -270,6 +267,9 @@ export default function App() {
     filter: false,
     sidebar: false,
   });
+  popoutOpenRef.current = popoutOpen;
+  /** 设置弹窗(标题栏 ⚙ / Ctrl+K 打开) */
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // 拖拽分隔条调整面板尺寸;双击复位
   const startResize = useCallback(
@@ -284,10 +284,10 @@ export default function App() {
             Math.max(startVal + (startPos - ev.clientY), 60),
             Math.round(window.innerHeight * 0.7),
           );
-          setFilterHeight(h);
+          setSetting("filterHeight", h, { silent: true });
         } else {
           const w = Math.min(Math.max(startVal + (ev.clientX - startPos), 160), 480);
-          setSidebarWidth(w);
+          setSetting("sidebarWidth", w, { silent: true });
         }
       };
       const onUp = () => {
@@ -302,9 +302,27 @@ export default function App() {
 
   // 打开/聚焦独立面板窗口(搜索命中 / 快照+标记)
   const openPanel = useCallback((kind: "filter" | "sidebar") => {
+    // 先同步置 ref(事件门控立即生效,避免 invoke 与渲染之间的转发空洞)
+    popoutOpenRef.current = { ...popoutOpenRef.current, [kind]: true };
     void (async () => {
       await invoke("open_panel", { kind });
       setPopoutOpen((p) => ({ ...p, [kind]: true }));
+      // 打开即重发完整快照:Linux 弹窗是新窗口(初始状态靠快照),
+      // Windows 是常驻隐藏窗口(关闭期间错过的事件由快照补齐)
+      if (kind === "filter") {
+        const meta = fileMetaRef.current;
+        if (meta) {
+          const snap = snapshotRef.current;
+          void appWindow
+            .emitTo("filter-popout", "filter_snapshot", {
+              fileId: meta.id,
+              lines: meta.lines,
+              sessions: snap.sessions,
+              activeId: snap.activeId,
+            })
+            .catch(() => {});
+        }
+      }
     })();
   }, []);
 
@@ -316,7 +334,10 @@ export default function App() {
     listen<string>("panel_closed", (e) => {
       const kind =
         e.payload === "filter-popout" ? "filter" : e.payload === "sidebar-popout" ? "sidebar" : null;
-      if (kind) setPopoutOpen((p) => ({ ...p, [kind]: false }));
+      if (kind) {
+        popoutOpenRef.current = { ...popoutOpenRef.current, [kind]: false };
+        setPopoutOpen((p) => ({ ...p, [kind]: false }));
+      }
     }).then((fn) => unlisteners.push(fn));
     return () => {
       for (const fn of unlisteners) fn();
@@ -462,13 +483,18 @@ export default function App() {
     [fileMeta],
   );
 
+  /** 打开文件(统一入口:透传编码设置;openFile 与 tail 重开共用,避免两处漂移) */
+  const openWithEncoding = useCallback(async (path: string): Promise<FileMeta> => {
+    return await invoke<FileMeta>("open_file", { path, forceEncoding: getSettings().encoding });
+  }, []);
+
   const openFile = useCallback(
     async (path?: string): Promise<boolean> => {
       const target = (path ?? filePath).trim();
       if (!target) return false;
       setStatusText("Opening…");
       try {
-        const meta = await invoke<FileMeta>("open_file", { path: target });
+        const meta = await openWithEncoding(target);
         setFileMeta(meta);
         setFilePath(target);
         setLineCache({});
@@ -478,12 +504,10 @@ export default function App() {
         setStatusText(
           `${meta.lines.toLocaleString()} lines · ${(meta.size / 1024 / 1024).toFixed(1)} MB · ${meta.encoding}`,
         );
-        localStorage.setItem(LAST_KEY, target);
-        setRecentFiles((prev) => {
-          const next = [target, ...prev.filter((p) => p !== target)].slice(0, MAX_RECENT);
-          localStorage.setItem(RECENT_KEY, JSON.stringify(next));
-          return next;
-        });
+        saveLastFile(target);
+        setRecentFiles(recordRecentFile(target));
+        // 设置项"打开时自动进入 tail"
+        if (getSettings().openTailMode) setTailMode(true);
         return true;
       } catch (e) {
         setStatusText(`Error: ${e}`);
@@ -491,23 +515,25 @@ export default function App() {
         return false;
       }
     },
-    [filePath],
+    [filePath, openWithEncoding],
   );
 
-  // 启动时自动打开上次关闭的文件;文件已不存在则清除记录,显示开始页
+  // 启动时自动打开上次关闭的文件(设置项可关);文件已不存在则清除记录,显示开始页
   const bootRef = useRef(false);
   useEffect(() => {
     if (bootRef.current) return;
     bootRef.current = true;
-    const last = localStorage.getItem(LAST_KEY);
+    if (!getSettings().restoreLastFile) return;
+    const last = loadLastFile();
     if (!last) return;
     void openFile(last).then((ok) => {
-      if (!ok) localStorage.removeItem(LAST_KEY);
+      if (!ok) clearLastFile();
     });
   }, [openFile]);
 
-  // 启动 3 秒后静默检查更新;未配置更新服务器/离线/未签名时静默失败
+  // 启动 3 秒后静默检查更新(设置项可关);未配置更新服务器/离线/未签名时静默失败
   useEffect(() => {
+    if (!getSettings().checkUpdateOnStart) return;
     const t = window.setTimeout(() => {
       void import("@tauri-apps/plugin-updater")
         .then(async ({ check }) => {
@@ -572,6 +598,86 @@ export default function App() {
     setStatusText("");
   }, [resetSearch]);
 
+  // ── 快捷键命令注册(命令系统;现有按钮/调用点保留,命令是补充触发路径)──
+
+  /** Ctrl+O:系统文件选择器(与欢迎页浏览按钮同配置) */
+  const openFileDialog = useCallback(async () => {
+    try {
+      const picked = await open({
+        // 指定父窗口:否则对话框可能出现在应用背后,造成"点了没反应+应用像卡死"
+        parent: getCurrentWindow(),
+        title: "选择日志文件",
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "日志文件", extensions: ["log", "txt", "out", "err"] },
+          { name: "所有文件", extensions: ["*"] },
+        ],
+      });
+      if (typeof picked === "string" && picked) void openFile(picked);
+    } catch (e) {
+      console.error("dialog open failed", e);
+    }
+  }, [openFile]);
+
+  /** 跳转到下一个/上一个命中(相对当前视口首行;F6 / Shift+F6) */
+  const jumpToHit = useCallback((dir: 1 | -1) => {
+    const lines = hitLinesRef.current;
+    if (lines.length === 0) return;
+    const first = logViewRef.current?.getFirstLine() ?? 0; // 0-based 视口首行
+    if (dir === 1) {
+      // 下一个:视口下方第一个命中;没有则回到第一个
+      const target = lines.find((l) => l - 1 > first) ?? lines[0];
+      logViewRef.current?.scrollToLine(target - 1);
+    } else {
+      const target = [...lines].reverse().find((l) => l - 1 < first) ?? lines[lines.length - 1];
+      logViewRef.current?.scrollToLine(target - 1);
+    }
+  }, []);
+
+  useEffect(() => {
+    const un: Array<() => void> = [];
+    un.push(registerCommand("openSettings", () => setSettingsOpen(true)));
+    un.push(
+      registerCommand("toggleTheme", () =>
+        setSetting("theme", effectiveTheme === "dark" ? "light" : "dark"),
+      ),
+    );
+    un.push(registerCommand("toggleTail", () => setTailMode((t) => !t)));
+    un.push(registerCommand("focusSearch", () => searchInputRef.current?.focus()));
+    un.push(registerCommand("openFile", () => void openFileDialog()));
+    un.push(registerCommand("closeFile", closeFile));
+    un.push(
+      registerCommand("toggleFilterPanel", () => {
+        // 可见 → 折叠;不可见 → 展开(若已弹出独立窗口,收回内嵌)
+        if (filterHidden || popoutOpenRef.current.filter) {
+          setFilterHidden(false);
+          setPopoutOpen((p) => ({ ...p, filter: false }));
+        } else {
+          setFilterHidden(true);
+        }
+      }),
+    );
+    un.push(registerCommand("toggleSidebar", () => setSidebarVisible((v) => !v)));
+    un.push(registerCommand("nextHit", () => jumpToHit(1)));
+    un.push(registerCommand("prevHit", () => jumpToHit(-1)));
+    un.push(
+      registerCommand("zoomIn", () =>
+        setSetting("fontSize", Math.min(16, getSettings().fontSize + 1)),
+      ),
+    );
+    un.push(
+      registerCommand("zoomOut", () =>
+        setSetting("fontSize", Math.max(11, getSettings().fontSize - 1)),
+      ),
+    );
+    un.push(registerCommand("resetZoom", () => setSetting("fontSize", 13)));
+    initCommandDispatcher();
+    return () => {
+      for (const f of un) f();
+    };
+  }, [effectiveTheme, closeFile, openFileDialog, jumpToHit, filterHidden]);
+
   // ── run search ──
   const runSearch = useCallback(
     async (q: string, r: boolean, c: boolean) => {
@@ -621,10 +727,12 @@ export default function App() {
           ].slice(0, MAX_SESSIONS),
         );
         setActiveId(id);
-        // 通知命中弹窗:新搜索会话(词/选项一并带上)
-        void appWindow
-          .emitTo("filter-popout", "search_started", { search_id: id, query: q, regex: r, caseSensitive: c })
-          .catch(() => {});
+        // 通知命中弹窗:新搜索会话(词/选项一并带上);未打开不转发
+        if (popoutOpenRef.current.filter) {
+          void appWindow
+            .emitTo("filter-popout", "search_started", { search_id: id, query: q, regex: r, caseSensitive: c })
+            .catch(() => {});
+        }
       } catch (e) {
         runningRef.current = false;
         console.error("start_search failed", e);
@@ -668,8 +776,10 @@ export default function App() {
       if (flushTimerRef.current === null) {
         flushTimerRef.current = window.setTimeout(flushHits, 80);
       }
-      // 转发给独立命中窗口(未打开时 emitTo 失败被忽略)
-      void appWindow.emitTo("filter-popout", "search_chunk_fwd", e.payload).catch(() => {});
+      // 转发给独立命中窗口(仅打开时;常驻隐藏窗口收事件是 Linux 卡顿根源之一)
+      if (popoutOpenRef.current.filter) {
+        void appWindow.emitTo("filter-popout", "search_chunk_fwd", e.payload).catch(() => {});
+      }
     }).then((fn) => unlisteners.push(fn));
 
     listen<SearchProgressPayload>("search_progress", (e) => {
@@ -678,7 +788,9 @@ export default function App() {
       setSessions((prev) =>
         prev.map((s) => (s.id === sid ? { ...s, progress: e.payload } : s)),
       );
-      void appWindow.emitTo("filter-popout", "search_progress_fwd", e.payload).catch(() => {});
+      if (popoutOpenRef.current.filter) {
+        void appWindow.emitTo("filter-popout", "search_progress_fwd", e.payload).catch(() => {});
+      }
     }).then((fn) => unlisteners.push(fn));
 
     listen<SearchDonePayload>("search_done", (e) => {
@@ -706,7 +818,9 @@ export default function App() {
             .filter((x) => x.id !== sid);
         });
         runningRef.current = false;
-        void appWindow.emitTo("filter-popout", "search_done_fwd", e.payload).catch(() => {});
+        if (popoutOpenRef.current.filter) {
+          void appWindow.emitTo("filter-popout", "search_done_fwd", e.payload).catch(() => {});
+        }
         return;
       }
       // 以后端权威计数为准:本地累加可能混入过期搜索的残留事件而虚高
@@ -724,7 +838,9 @@ export default function App() {
         ),
       );
       runningRef.current = false;
-      void appWindow.emitTo("filter-popout", "search_done_fwd", e.payload).catch(() => {});
+      if (popoutOpenRef.current.filter) {
+        void appWindow.emitTo("filter-popout", "search_done_fwd", e.payload).catch(() => {});
+      }
     }).then((fn) => unlisteners.push(fn));
 
     return () => {
@@ -771,7 +887,9 @@ export default function App() {
       setCaseSensitive(target.caseSensitive);
     }
     setActiveId(id);
-    void appWindow.emitTo("filter-popout", "session_active_fwd", { search_id: id }).catch(() => {});
+    if (popoutOpenRef.current.filter) {
+      void appWindow.emitTo("filter-popout", "session_active_fwd", { search_id: id }).catch(() => {});
+    }
   }, []);
 
   /** 关闭单个会话;正在跑的会话一并停止后端扫描 */
@@ -784,7 +902,9 @@ export default function App() {
       return prev.filter((s) => s.id !== id);
     });
     setActiveId((a) => (a === id ? null : a));
-    void appWindow.emitTo("filter-popout", "session_close_fwd", { search_id: id }).catch(() => {});
+    if (popoutOpenRef.current.filter) {
+      void appWindow.emitTo("filter-popout", "session_close_fwd", { search_id: id }).catch(() => {});
+    }
   }, []);
 
   /** 清空全部会话 */
@@ -803,7 +923,9 @@ export default function App() {
     setActiveId(null);
     searchIdRef.current = null;
     runningRef.current = false;
-    void appWindow.emitTo("filter-popout", "sessions_clear_fwd", {}).catch(() => {});
+    if (popoutOpenRef.current.filter) {
+      void appWindow.emitTo("filter-popout", "sessions_clear_fwd", {}).catch(() => {});
+    }
   }, []);
 
   // ── 独立面板窗口(popout)桥接 ──
@@ -819,6 +941,7 @@ export default function App() {
         void appWindow
           .emitTo("filter-popout", "filter_snapshot", {
             fileId: meta.id,
+            lines: meta.lines,
             sessions: snap.sessions,
             activeId: snap.activeId,
           })
@@ -845,9 +968,11 @@ export default function App() {
         setCaseSensitive(target.caseSensitive);
       }
       setActiveId(e.payload.search_id);
-      void appWindow
-        .emitTo("filter-popout", "session_active_fwd", { search_id: e.payload.search_id })
-        .catch(() => {});
+      if (popoutOpenRef.current.filter) {
+        void appWindow
+          .emitTo("filter-popout", "session_active_fwd", { search_id: e.payload.search_id })
+          .catch(() => {});
+      }
     }).then((fn) => unlisteners.push(fn));
 
     // popout 内关闭会话/清空 → 主窗口执行(状态统一后广播回 popout)
@@ -957,6 +1082,7 @@ export default function App() {
     }
   }, []);
 
+  const tailPollMs = useSettings((s) => s.tailPollMs);
   useEffect(() => {
     if (!tailMode || !fileMeta) return;
     const timer = window.setInterval(async () => {
@@ -965,8 +1091,9 @@ export default function App() {
       try {
         const size = await invoke<number>("file_size", { path: meta.id });
         if (size > meta.size) {
-          // 重新打开:新 mmap + 重建索引(页缓存命中,代价≈读新增部分)
-          const newMeta = await invoke<FileMeta>("open_file", { path: meta.id });
+          // 重新打开:新 mmap + 重建索引(页缓存命中,代价≈读新增部分);
+          // 透传编码设置,避免强制编码被悄悄拉回自动
+          const newMeta = await openWithEncoding(meta.id);
           setFileMeta(newMeta);
           if (newMeta.lines > meta.lines) {
             void tailRefresh();
@@ -975,9 +1102,9 @@ export default function App() {
       } catch {
         // 文件被删除/暂时不可读,下轮重试
       }
-    }, 1000);
+    }, tailPollMs);
     return () => window.clearInterval(timer);
-  }, [tailMode, fileMeta, tailRefresh]);
+  }, [tailMode, fileMeta, tailRefresh, tailPollMs, openWithEncoding]);
 
   const fetchLines = useCallback(
     async (start: number, count: number) => {
@@ -1013,6 +1140,13 @@ export default function App() {
     <div className={`app ${dropActive ? "app-dropping" : ""}`}>
       <div className="titlebar" data-tauri-drag-region>
         <span className="title">hi-log</span>
+        <button
+          className="titlebar-btn"
+          title="设置 (Ctrl+K)"
+          onClick={() => setSettingsOpen(true)}
+        >
+          ⚙
+        </button>
         <div className="win-controls">
           <button onClick={() => appWindow.minimize()} aria-label="minimize">─</button>
           <button onClick={() => appWindow.toggleMaximize()} aria-label="maximize">□</button>
@@ -1087,7 +1221,7 @@ export default function App() {
                   <div
                     className="sidebar-resizer"
                     onPointerDown={(e) => startResize(e, "width")}
-                    onDoubleClick={() => setSidebarWidth(230)}
+                    onDoubleClick={() => setSetting("sidebarWidth", 230, { silent: true })}
                     title="拖动调整宽度,双击复位"
                   />
                 </>
@@ -1111,7 +1245,7 @@ export default function App() {
               <div
                 className="filter-resizer"
                 onPointerDown={(e) => startResize(e, "height")}
-                onDoubleClick={() => setFilterHeight(220)}
+                onDoubleClick={() => setSetting("filterHeight", 220, { silent: true })}
                 title="拖动调整高度,双击复位"
               />
               <FilterView
@@ -1128,6 +1262,7 @@ export default function App() {
                 hitCount={hitCount}
                 truncated={truncated}
                 height={filterHeight}
+                lineCount={fileMeta.lines}
                 onPopout={() => openPanel("filter")}
                 onCollapse={() => setFilterHidden(true)}
               />
@@ -1144,6 +1279,7 @@ export default function App() {
             onSearch={doSearch}
             onStop={stopSearch}
             onApplyQuery={applyQuery}
+            inputRef={searchInputRef}
             hitCount={hitCount}
             truncated={truncated}
             progress={searchProgress}
@@ -1198,6 +1334,8 @@ export default function App() {
 
       {promptCfg && <PromptModal {...promptCfg} onClose={() => setPromptCfg(null)} />}
 
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+
       {pendingUpdate && (
         <ConfirmModal
           title="发现新版本"
@@ -1234,10 +1372,10 @@ export default function App() {
           </button>
           <button
             className="theme-toggle"
-            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-            title="切换浅色/深色主题"
+            onClick={() => setSetting("theme", effectiveTheme === "dark" ? "light" : "dark")}
+            title="切换浅色/深色主题(设置中可选跟随系统)"
           >
-            {theme === "dark" ? "☀️" : "🌙"}
+            {effectiveTheme === "dark" ? "☀️" : "🌙"}
           </button>
         </div>
       )}

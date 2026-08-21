@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from "react";
 import { highlightText } from "../utils/highlight";
+import { useSettings, getSettings, setSetting, expandContext } from "../utils/settings";
 
 /** 搜索会话(Notepad++ Search Results 风格,多会话并存) */
 export interface SearchSession {
@@ -33,14 +34,17 @@ interface Props {
   truncated: boolean;
   /** 外部控制高度(主窗口拖拽);省略时用 CSS 默认值 */
   height?: number | string;
+  /** 文件总行数(上下文展开上限) */
+  lineCount: number;
   /** 弹出为独立窗口按钮(仅主窗口内嵌版提供) */
   onPopout?: () => void;
   /** 收起内嵌面板按钮 */
   onCollapse?: () => void;
 }
 
-const ROW_HEIGHT = 22;
 const BUFFER = 10;
+/** 稠密命中防御:开启上下文(±N>0)时最多展示的行数(虚拟滚动只渲染视口,截断仅影响可跳转性) */
+const MAX_DISPLAY_LINES = 2_000_000;
 
 export default function FilterView({
   sessions,
@@ -58,10 +62,13 @@ export default function FilterView({
   height,
   onPopout,
   onCollapse,
+  lineCount,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewHeight, setViewHeight] = useState(0);
+  // 行高 = 字号 + 行距(设置层唯一公式,与 LogView 同步)
+  const rowHeight = useSettings((s) => s.fontSize + s.rowSpacing);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -72,6 +79,32 @@ export default function FilterView({
     return () => ro.disconnect();
   }, []);
 
+  // 字号/行高变化瞬间:保持"视口顶部所在行"不变,滚动位置按新旧比例换算
+  const prevRowRef = useRef(rowHeight);
+  useEffect(() => {
+    const prev = prevRowRef.current;
+    prevRowRef.current = rowHeight;
+    if (prev === rowHeight || !containerRef.current) return;
+    const el = containerRef.current;
+    const lineF = el.scrollTop / prev;
+    el.scrollTop = lineF * rowHeight;
+    setScrollTop(el.scrollTop);
+  }, [rowHeight]);
+
+  // Ctrl+滚轮缩放字号(原生监听:React onWheel 是 passive,无法 preventDefault)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      const fs = getSettings().fontSize;
+      setSetting("fontSize", Math.min(16, Math.max(11, fs + (e.deltaY < 0 ? 1 : -1))));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   // 激活会话(找不到 activeId 时回退到最新)
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0] ?? null;
   const hitLines = useMemo(() => {
@@ -80,26 +113,34 @@ export default function FilterView({
     return Object.keys(active.highlightMap).map(Number);
   }, [active]);
 
+  // 上下文 ±N 行:命中行展开为显示行(上下文行调暗,一眼区分);稠密命中截断防御
+  const contextLines = useSettings((s) => s.contextLines);
+  const displayLines = useMemo(() => {
+    if (contextLines <= 0) return hitLines;
+    const expanded = expandContext(hitLines, contextLines, lineCount);
+    return expanded.length > MAX_DISPLAY_LINES ? expanded.slice(0, MAX_DISPLAY_LINES) : expanded;
+  }, [hitLines, contextLines, lineCount]);
+
   const range = useMemo(() => {
     if (viewHeight === 0) return { start: 0, end: 0 };
-    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
-    const count = Math.ceil(viewHeight / ROW_HEIGHT) + BUFFER * 2;
-    return { start, end: Math.min(hitLines.length, start + count) };
-  }, [scrollTop, viewHeight, hitLines.length]);
+    const start = Math.max(0, Math.floor(scrollTop / rowHeight) - BUFFER);
+    const count = Math.ceil(viewHeight / rowHeight) + BUFFER * 2;
+    return { start, end: Math.min(displayLines.length, start + count) };
+  }, [scrollTop, viewHeight, displayLines.length, rowHeight]);
 
-  const visibleHits = useMemo(
-    () => hitLines.slice(range.start, range.end),
-    [hitLines, range],
+  const visibleLines = useMemo(
+    () => displayLines.slice(range.start, range.end),
+    [displayLines, range],
   );
 
-  // 拉取可见命中行的文本
+  // 拉取可见显示行(命中+上下文)的文本
   const missing = useMemo(() => {
     const list: number[] = [];
-    for (const ln of visibleHits) {
+    for (const ln of visibleLines) {
       if (!(ln - 1 in lineCache)) list.push(ln - 1);
     }
     return list;
-  }, [visibleHits, lineCache]);
+  }, [visibleLines, lineCache]);
 
   const fetchVisible = useCallback(async () => {
     if (missing.length === 0) return;
@@ -151,6 +192,7 @@ export default function FilterView({
         <span className="filter-info">
           {hitCount.toLocaleString()}
           {truncated ? "+" : ""} 命中
+          {contextLines > 0 && <span className="ctx-badge">±{contextLines}</span>}
         </span>
         <button
           className="panel-btn"
@@ -183,16 +225,17 @@ export default function FilterView({
         ref={containerRef}
         onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
       >
-        {active && hitLines.length > 0 ? (
-          <div className="filter-canvas" style={{ height: hitLines.length * ROW_HEIGHT }}>
-            {visibleHits.map((ln, idx) => {
+        {active && displayLines.length > 0 ? (
+          <div className="filter-canvas" style={{ height: displayLines.length * rowHeight }}>
+            {visibleLines.map((ln, idx) => {
               const lineNo0 = ln - 1;
               const text = lineCache[lineNo0] ?? "";
+              const isHit = ln in highlightMap;
               return (
                 <div
                   key={ln}
-                  className="filter-row"
-                  style={{ position: "absolute", top: (range.start + idx) * ROW_HEIGHT, height: ROW_HEIGHT }}
+                  className={`filter-row ${isHit ? "" : "ctx"}`}
+                  style={{ position: "absolute", top: (range.start + idx) * rowHeight, height: rowHeight }}
                   title={text}
                   onClick={() => onJump(lineNo0)}
                   onContextMenu={(e) => {
@@ -202,7 +245,7 @@ export default function FilterView({
                 >
                   <span className="filter-line-no">{String(ln).padStart(7, " ")}</span>
                   <span className="filter-text">
-                    {text ? highlightText(text, highlightMap[ln] ?? [], `f-${ln}`) : text}
+                    {text ? (isHit ? highlightText(text, highlightMap[ln] ?? [], `f-${ln}`) : text) : text}
                   </span>
                 </div>
               );

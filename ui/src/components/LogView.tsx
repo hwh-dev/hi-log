@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect, useCallback, useMemo, forwardRef, useImperativeHandle, memo } from "react";
 import { highlightText } from "../utils/highlight";
 import { paletteColor, type Mark } from "../utils/palette";
+import { useSettings, getSettings, setSetting } from "../utils/settings";
 
 interface Props {
   lineCount: number;
@@ -24,7 +25,6 @@ export interface LogViewHandle {
   getFirstLine: () => number;
 }
 
-const ROW_HEIGHT = 22; // px, monospace 13px + 9px padding
 const BUFFER = 10; // extra rows above/below viewport
 
 const LogView = forwardRef<LogViewHandle, Props>(function LogView(
@@ -36,6 +36,8 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   const [viewportHeight, setViewportHeight] = useState(0);
   const fetchingRef = useRef(false);
   const prevCountRef = useRef(lineCount);
+  // 行高 = 字号 + 行距(设置层唯一公式);字号/行距变化 → 组件重渲 + 滚动换算同步
+  const rowHeight = useSettings((s) => s.fontSize + s.rowSpacing);
 
   // tail 模式:行数增长时自动跟随底部
   useEffect(() => {
@@ -43,11 +45,11 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
     prevCountRef.current = lineCount;
     if (followTail && lineCount > prev && viewportRef.current) {
       const el = viewportRef.current;
-      const top = lineCount * ROW_HEIGHT;
+      const top = lineCount * rowHeight;
       el.scrollTop = top;
       setScrollTop(top);
     }
-  }, [lineCount, followTail]);
+  }, [lineCount, followTail, rowHeight]);
 
   // Track viewport size
   useEffect(() => {
@@ -61,23 +63,49 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
     return () => ro.disconnect();
   }, []);
 
+  // 字号/行高变化瞬间:保持"视口顶部所在行"不变,滚动位置按新旧比例换算,避免跳动
+  const prevRowRef = useRef(rowHeight);
+  useEffect(() => {
+    const prev = prevRowRef.current;
+    prevRowRef.current = rowHeight;
+    if (prev === rowHeight || !viewportRef.current) return;
+    const el = viewportRef.current;
+    const lineF = el.scrollTop / prev;
+    el.scrollTop = lineF * rowHeight;
+    setScrollTop(el.scrollTop);
+  }, [rowHeight]);
+
+  // Ctrl+滚轮缩放字号(原生监听:React onWheel 是 passive,无法 preventDefault 拦截页面缩放)
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return; // 普通滚动完全放行
+      e.preventDefault();
+      const fs = getSettings().fontSize;
+      setSetting("fontSize", Math.min(16, Math.max(11, fs + (e.deltaY < 0 ? 1 : -1))));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
       scrollToLine(lineNo0: number) {
         const el = viewportRef.current;
         if (!el) return;
-        const top = Math.max(0, lineNo0 * ROW_HEIGHT - viewportHeight / 3);
+        const top = Math.max(0, lineNo0 * rowHeight - viewportHeight / 3);
         el.scrollTop = top; // 同步赋值,避免 scrollTo 异步时序
         setScrollTop(top);
         // 预取目标行附近,避免跳转后屏幕空白等待 fetch
         void fetchLines(Math.max(0, lineNo0 - 20), 41);
       },
       getFirstLine() {
-        return Math.floor((viewportRef.current?.scrollTop ?? 0) / ROW_HEIGHT);
+        return Math.floor((viewportRef.current?.scrollTop ?? 0) / rowHeight);
       },
     }),
-    [viewportHeight, fetchLines],
+    [viewportHeight, fetchLines, rowHeight],
   );
 
   // Update scroll position
@@ -88,11 +116,11 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   // Calculate visible range
   const visibleRange = useMemo(() => {
     if (viewportHeight === 0 || lineCount === 0) return { start: 0, end: 0 };
-    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
-    const count = Math.ceil(viewportHeight / ROW_HEIGHT) + BUFFER * 2;
+    const start = Math.max(0, Math.floor(scrollTop / rowHeight) - BUFFER);
+    const count = Math.ceil(viewportHeight / rowHeight) + BUFFER * 2;
     const end = Math.min(lineCount, start + count);
     return { start, end };
-  }, [scrollTop, viewportHeight, lineCount]);
+  }, [scrollTop, viewportHeight, lineCount, rowHeight]);
 
   // Fetch missing lines in visible range
   useEffect(() => {
@@ -133,8 +161,8 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
           className="log-line"
           style={{
             position: "absolute",
-            top: i * ROW_HEIGHT,
-            height: ROW_HEIGHT,
+            top: i * rowHeight,
+            height: rowHeight,
             borderLeftColor: markColor,
             // 标记行整行着色(8 位 hex alpha ≈ 13%),一眼可辨
             backgroundColor: markColor ? `${markColor}22` : undefined,
@@ -154,9 +182,9 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
       );
     }
     return result;
-  }, [visibleRange, lineCache, highlightMap, marks, pins, onContextMenu]);
+  }, [visibleRange, lineCache, highlightMap, marks, pins, onContextMenu, rowHeight]);
 
-  const totalHeight = lineCount * ROW_HEIGHT;
+  const totalHeight = lineCount * rowHeight;
 
   return (
     <div className="log-viewport" ref={viewportRef} onScroll={handleScroll}>

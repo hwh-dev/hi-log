@@ -5,6 +5,7 @@ mod ipc;
 mod mcp;
 
 use hi_log_core::document::Document as CoreDocument;
+use hi_log_core::encoding::Encoding as CoreEncoding;
 use hi_log_core::marks::{
     Mark as CoreMark, MarkStore, Pin as CorePin, PinGroup as CorePinGroup,
 };
@@ -41,8 +42,20 @@ struct LineData {
 }
 
 #[tauri::command]
-fn open_file(state: State<AppState>, path: String) -> Result<FileMeta, String> {
-    let doc = CoreDocument::open(&path).map_err(|e| format!("open: {e}"))?;
+fn open_file(
+    state: State<AppState>,
+    path: String,
+    force_encoding: Option<String>,
+) -> Result<FileMeta, String> {
+    // 强制编码覆盖自动检测(设置项:auto/utf8/gbk/utf16);UTF-16 统一按 LE 尝试
+    let enc = match force_encoding.as_deref() {
+        None | Some("auto") => None,
+        Some("utf8") => Some(CoreEncoding::Utf8),
+        Some("gbk") => Some(CoreEncoding::Gbk),
+        Some("utf16") => Some(CoreEncoding::Utf16Le),
+        Some(other) => return Err(format!("unknown encoding: {other}")),
+    };
+    let doc = CoreDocument::open_with_encoding(&path, enc).map_err(|e| format!("open: {e}"))?;
     let meta = FileMeta {
         id: path.clone(),
         size: doc.size(),
@@ -496,29 +509,90 @@ fn move_pin_to_group(
 
 // ── 独立面板窗口: 搜索命中 / 快照+标记 可弹出为单独窗口 ──
 
-/// 打开(或聚焦)一个独立面板窗口。窗口前端复用同一 index.html,
+/// 弹窗窗口规格:label / 标题 / 宽 / 高
+fn panel_spec(kind: &str) -> Option<(&'static str, &'static str, f64, f64)> {
+    match kind {
+        "filter" => Some(("filter-popout", "搜索命中 — hi-log", 760.0, 520.0)),
+        "sidebar" => Some(("sidebar-popout", "快照与标记 — hi-log", 400.0, 680.0)),
+        _ => None,
+    }
+}
+
+/// 创建(或重建)一个独立面板窗口。前端复用同一 index.html,
 /// 由 main.tsx 按 window label 分流渲染不同面板。
+///
+/// 平台差异(弹窗生命周期):
+/// - **Windows**:启动时预创建+隐藏常驻(wry 运行时创建的第二个 webview 会
+///   空白),关闭=隐藏、webview 永不销毁;open_panel 只 show/focus。
+/// - **Linux / macOS**(WebKitGTK / WKWebView 无此 bug):首次打开才创建,
+///   关闭即销毁、无常驻隐藏 webview。原"常驻隐藏"方案在 Linux 上卡顿的
+///   根源:隐藏的 webkit 进程仍持续合成渲染 + 常驻 webview 全程收事件。
+fn create_popout_window(
+    app: &tauri::AppHandle,
+    kind: &str,
+) -> Result<tauri::WebviewWindow, String> {
+    let (label, title, width, height) =
+        panel_spec(kind).ok_or_else(|| format!("unknown panel kind: {kind}"))?;
+    #[cfg(debug_assertions)]
+    eprintln!("[hi-log] popout {label} create on {}", std::env::consts::OS);
+    let builder = tauri::WebviewWindowBuilder::new(
+        app,
+        label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title(title)
+    .inner_size(width, height)
+    .min_inner_size(320.0, 240.0);
+    // 仅 Windows 预创建必须隐藏,open_panel 时再 show;
+    // shadow 重绑定使 Windows 独有字段不引入 unused_mut 警告(非 Windows 分支从不重赋值)
+    #[cfg(target_os = "windows")]
+    let builder = builder.visible(false);
+    let win = builder.build().map_err(|e| e.to_string())?;
+    // 关闭拦截:两平台都必须广播 panel_closed(主窗口据此恢复内嵌面板)。
+    // 不注册 JS onCloseRequested 监听(那会让关闭走 JS destroy 流程,
+    // Windows WebView2 异常环境下销毁可能卡死整个应用);Rust 侧处理最稳。
+    {
+        let app2 = app.clone();
+        let label2 = label;
+        #[cfg(target_os = "windows")]
+        let win2 = win.clone();
+        win.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                #[cfg(target_os = "windows")]
+                {
+                    // Windows:关闭=隐藏,窗口与 webview 永远存活
+                    api.prevent_close();
+                    let _ = win2.hide();
+                }
+                // 非 Windows 平台 api 仅用于 prevent_close,此处显式忽略
+                #[cfg(not(target_os = "windows"))]
+                let _ = api;
+                #[cfg(debug_assertions)]
+                eprintln!("[hi-log] popout {label2} closed on {}", std::env::consts::OS);
+                let _ = app2.emit("panel_closed", &label2);
+            }
+            _ => {}
+        });
+    }
+    Ok(win)
+}
+
+/// 打开(或聚焦)一个独立面板窗口。
 #[tauri::command]
 fn open_panel(app: AppHandle, kind: String) -> Result<(), String> {
-    let (label, title, width, height) = match kind.as_str() {
-        "filter" => ("filter-popout", "搜索命中 — hi-log", 760.0, 520.0),
-        "sidebar" => ("sidebar-popout", "快照与标记 — hi-log", 400.0, 680.0),
-        _ => return Err(format!("unknown panel kind: {kind}")),
-    };
-    // 窗口在启动时预创建(setup),这里只负责显示/聚焦;
-    // 关闭=隐藏(见 setup),窗口与 webview 永远存活
+    let (label, _, _, _) =
+        panel_spec(&kind).ok_or_else(|| format!("unknown panel kind: {kind}"))?;
+    // 已存在(Windows 预创建常驻 / Linux 尚未关闭)→ 只显示/聚焦
     if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(());
     }
-    // 兜底(正常流程不会走到):运行时创建在 wry 当前版本下可能空白
-    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App("index.html".into()))
-        .title(title)
-        .inner_size(width, height)
-        .min_inner_size(320.0, 240.0)
-        .build()
-        .map_err(|e| e.to_string())?;
+    // 不存在(Linux/macOS 首次打开或上次关闭已销毁)→ 运行时创建。
+    // Windows 下此为兜底(正常流程启动时已预创建)。
+    let win = create_popout_window(&app, &kind)?;
+    let _ = win.show();
+    let _ = win.set_focus();
     Ok(())
 }
 
@@ -617,45 +691,15 @@ fn main() {
                 .map_err(|e| format!("marks db open failed: {e}"))?;
             app.manage(MarkState { store: Mutex::new(store) });
 
-            // 弹窗窗口启动时预创建(隐藏):wry 当前版本下"运行时创建的第二个 webview"
-            // 控制器永不导航(空白窗),启动时创建则正常。因此弹窗生命周期=常驻:
-            // 关闭改成隐藏(webview 存活),open_panel 只负责 show/focus。
-            for (label, title, w, h) in [
-                ("filter-popout", "搜索命中 — hi-log", 760.0, 520.0),
-                ("sidebar-popout", "快照与标记 — hi-log", 400.0, 680.0),
-            ] {
-                let win = match tauri::WebviewWindowBuilder::new(
-                    app,
-                    label,
-                    tauri::WebviewUrl::App("index.html".into()),
-                )
-                .title(title)
-                .inner_size(w, h)
-                .min_inner_size(320.0, 240.0)
-                .visible(false)
-                .build()
-                {
-                    Ok(w) => w,
-                    Err(e) => {
-                        eprintln!("panel {label} pre-create failed: {e}");
-                        continue;
-                    }
-                };
-                // 关闭 = 隐藏 + 广播 panel_closed(主窗口恢复内嵌面板)。
-                // 不注册 JS onCloseRequested 监听(那会让关闭走 JS destroy 流程,
-                // 运行时销毁路径同样可能卡死/失效);Rust 侧 prevent + hide 最稳。
-                {
-                    let app2 = app.handle().clone();
-                    let label2 = label;
-                    let win2 = win.clone();
-                    win.on_window_event(move |event| match event {
-                        tauri::WindowEvent::CloseRequested { api, .. } => {
-                            api.prevent_close();
-                            let _ = win2.hide();
-                            let _ = app2.emit("panel_closed", &label2);
-                        }
-                        _ => {}
-                    });
+            // 弹窗窗口:Windows 启动时预创建(隐藏)—— wry 当前版本下"运行时创建的
+            // 第二个 webview"控制器永不导航(空白窗),启动时创建才正常;弹窗常驻,
+            // 关闭=隐藏(webview 存活),open_panel 只负责 show/focus。
+            // Linux/macOS 无此 bug:不预创建,首次打开才创建、关闭即销毁,避免
+            // 常驻隐藏 webkit 进程(隐藏窗口仍持续合成渲染 —— Linux 卡顿根源)。
+            #[cfg(target_os = "windows")]
+            for kind in ["filter", "sidebar"] {
+                if let Err(e) = create_popout_window(app.handle(), kind) {
+                    eprintln!("panel {kind} pre-create failed: {e}");
                 }
             }
 

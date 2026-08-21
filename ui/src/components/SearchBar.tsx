@@ -1,4 +1,10 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type Ref } from "react";
+import {
+  getSettings,
+  loadSearchHistory,
+  recordSearchHistory,
+  clearSearchHistory,
+} from "../utils/settings";
 
 interface Props {
   query: string;
@@ -19,20 +25,8 @@ interface Props {
   onToggleFilter: () => void;
   /** 按给定词立即搜索(历史点击/上下键选择时用当前选项) */
   onApplyQuery: (q: string, regex: boolean, caseSensitive: boolean) => void;
-}
-
-const HISTORY_KEY = "hi-log.search-history";
-const HISTORY_MAX = 50;
-
-/** 历史兼容:旧格式 [{q,regex,caseSensitive}] 只取 q,新格式为 string[] */
-function loadHistory(): string[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]");
-    if (!Array.isArray(v)) return [];
-    return v.map((h) => (typeof h === "string" ? h : h?.q ?? "")).filter((s) => s);
-  } catch {
-    return [];
-  }
+  /** 外部聚焦引用(快捷键 Ctrl+F 聚焦搜索栏) */
+  inputRef?: Ref<HTMLInputElement>;
 }
 
 /** 命中部分高亮(前缀或包含匹配) */
@@ -69,13 +63,14 @@ export default function SearchBar({
   filterVisible,
   onToggleFilter,
   onApplyQuery,
+  inputRef,
 }: Props) {
   const pct = progress && progress.total > 0
     ? Math.round((progress.scanned / progress.total) * 100)
     : 0;
 
   // ── 搜索历史(localStorage 持久化,最近在前,去重;仅存查询词)──
-  const [history, setHistory] = useState<string[]>(loadHistory);
+  const [history, setHistory] = useState<string[]>(loadSearchHistory);
   const [suggestOpen, setSuggestOpen] = useState(false);
   /** 高亮索引;-1 = 无高亮(输入框保持用户文本) */
   const [hi, setHi] = useState(-1);
@@ -88,14 +83,10 @@ export default function SearchBar({
   const [browsing, setBrowsing] = useState(false);
   const browseRef = useRef<string[]>([]);
 
-  // 记录一次搜索:新词插入最前,已有词置顶
+  // 记录一次搜索:新词插入最前,已有词置顶;上限走设置(searchHistoryMax)
   const recordHistory = (q: string) => {
     if (!q.trim()) return;
-    setHistory((prev) => {
-      const next = [q, ...prev.filter((h) => h !== q)].slice(0, HISTORY_MAX);
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      return next;
-    });
+    setHistory(recordSearchHistory(q, getSettings().searchHistoryMax));
   };
 
   // 实时候选:输入非空 → 前缀匹配优先、其次包含;空输入 → 全部历史
@@ -149,6 +140,7 @@ export default function SearchBar({
       <div className="search-input-wrap">
         <input
           className="search-input"
+          ref={inputRef}
           value={query}
           onChange={(e) => {
             setUserText(e.target.value);
@@ -234,7 +226,7 @@ export default function SearchBar({
               className="suggest-clear"
               onMouseDown={() => {
                 setHistory([]);
-                localStorage.removeItem(HISTORY_KEY);
+                clearSearchHistory();
                 setSuggestOpen(false);
                 setBrowsing(false);
               }}

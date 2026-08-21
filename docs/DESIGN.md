@@ -131,3 +131,57 @@ marks_changed   { file_id }
 2. 标记组织:**颜色分组 + 自定义组名**
 3. 前端框架:**React 18 + TypeScript**
 4. 标题栏:**自定义**(VS Code 风格,P0 起)
+
+## 9. 多窗口(弹窗)设计(实现阶段追加,2026-08)
+
+底部过滤视图与侧栏可弹出为独立窗口(popout),多窗口间状态实时同步。
+
+### 9.1 窗口拓扑与路由
+
+- 主窗口 label `main`(tauri.conf.json 默认);弹窗固定两个 label:`filter-popout`、`sidebar-popout`。
+- 三个窗口加载同一 `index.html`,`ui/src/main.tsx` 按 `getCurrentWindow().label` 分流渲染 App / FilterPopout / SidebarPopout。
+
+### 9.2 弹窗生命周期(平台差异,src-tauri/src/main.rs)
+
+| 平台 | 创建 | 关闭 | 原因 |
+| --- | --- | --- | --- |
+| Windows | 启动时预创建 2 个隐藏窗口(setup) | 拦截 CloseRequested:`prevent_close()` + `hide()` + 广播 `panel_closed`,webview 永不销毁 | wry 0.55.x(WebView2)运行时创建的第二个 webview 控制器永不导航(空白窗);JS `onCloseRequested`/`destroy()` 路径在异常环境下可能卡死整个应用,故用 Rust 侧 prevent+hide |
+| Linux / macOS | 首次 `open_panel` 时懒创建 | 不拦截,正常销毁,关闭前广播 `panel_closed` | WebKitGTK / WKWebView 无 wry 空白 bug;常驻隐藏 webkit 进程仍持续合成渲染 + 全程收事件,是 Linux 弹窗卡顿的根源。销毁后 label 自动释放,重开重建 |
+
+实现:`create_popout_window()` 统一封装创建+关闭拦截,平台差异用 `#[cfg(target_os = "windows")]` 隔离;`open_panel` 先查 `get_webview_window`,存在则 show/focus,不存在(Linux 销毁后 / Windows 兜底)才创建。
+
+### 9.3 状态同步(事件桥,全在 JS 侧)
+
+- **快照握手**:弹窗挂载 emit `panel_ready {kind}` → 主窗口回发 `filter_snapshot {fileId, sessions, activeId}` / `sidebar_snapshot {fileId}`;`openPanel` 每次打开后也主动重发 filter_snapshot(Windows 常驻窗口关闭期间错过的事件由此补齐,Linux 首次打开兜底)。
+- **搜索增量**:主窗口把 Rust 全局事件 `search_chunk/progress/done` 定向转发 `search_chunk_fwd/*_fwd`(带 `search_id`,前端按 id 丢弃过期残留);**仅弹窗打开时转发**(`popoutOpenRef` 门控,避免常驻隐藏窗口收事件)。
+- **会话操作**:弹窗发起 `panel_session_activate/close/clear` → 主窗口统一执行状态 → 广播回弹窗,两端一致。
+- **跳转**:弹窗点击命中行 `emitTo("main","goto_line")` → 主视图滚动+聚焦。
+- **全局广播**(Rust `app.emit`,各窗口自行监听):`marks_changed` / `pins_changed` / `snapshots_changed` / `panel_closed`。
+- **节流**:主窗口命中合并 80ms 节流(App.tsx flushHits);弹窗转发不节流,故 FilterPopout 同样做 80ms 节流,`search_done_fwd` 时冲刷残余。
+
+### 9.4 Linux 卡顿排查(如仍有)
+
+- 已消除:启动即常驻的 2 个隐藏 webkit 进程(合成渲染 + 事件处理)、隐藏窗口收事件风暴、弹窗逐 chunk setState。
+- 若在特定显卡/合成器下仍有卡顿(WebKitGTK 渲染层问题):尝试
+  `WEBKIT_DISABLE_COMPOSITING_MODE=1`(禁用合成,软件渲染)或
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`(Mesa dmabuf 缺陷导致的花屏/卡顿)。
+- debug 构建下弹窗创建/关闭有 `[hi-log] popout ...` stderr 日志,可据此确认平台走了哪条生命周期路径。
+
+### 9.5 WSLg 窗口不出现(2026-08-21 实测确认)
+
+**症状**:WSL2 + WSLg 下 `hi-log` 进程存活,但桌面无窗口;stderr 出现
+`MESA: error: ZINK: failed to choose pdev`、`egl: failed to create dri2 screen`。
+
+**根因**:WSLg 注入 `WAYLAND_DISPLAY=wayland-0`,GTK3 默认选 **Wayland** 后端;
+WebKitGTK 2.52 在该环境下 EGL/Mesa(zink)初始化失败,窗口从未映射。
+实测 `GDK_BACKEND=x11` 强制走 X11 后端后窗口正常出现(仅剩无害的 DRI3 警告)。
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` / `WEBKIT_DISABLE_COMPOSITING_MODE=1`
+单独使用无效(仍需 x11);`LIBGL_ALWAYS_SOFTWARE=1` 可去掉 DRI3 警告(软件渲染兜底)。
+
+**修复**:启动脚本 `scripts/wsl-run.sh`(WSL 内检测到 microsoft 内核时自动设
+`GDK_BACKEND=x11`);或手动 `export GDK_BACKEND=x11`。
+
+**附带发现**:WSL 里直接 `cargo build`(未走 tauri-cli)产出的是 dev 模式二进制
+(未启用 `custom-protocol` feature),会去连 `devUrl`(localhost:5173),无 vite 服务
+时窗口显示 "Could not connect to localhost"。需 `cargo build --features tauri/custom-protocol`
+嵌入 `ui/dist` 前端资源,或改用 `tauri dev`。
