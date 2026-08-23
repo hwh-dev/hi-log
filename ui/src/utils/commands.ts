@@ -16,6 +16,7 @@ export type CommandId =
   | "toggleSidebar"
   | "openFile"
   | "closeFile"
+  | "gotoLine"
   | "zoomIn"
   | "zoomOut"
   | "resetZoom";
@@ -35,6 +36,7 @@ export const COMMANDS: CommandDef[] = [
   { id: "toggleTheme", label: "切换主题", defaultBinding: "Ctrl+Shift+T" },
   { id: "openFile", label: "打开文件", defaultBinding: "Ctrl+O" },
   { id: "closeFile", label: "关闭当前文件", defaultBinding: "Ctrl+W" },
+  { id: "gotoLine", label: "跳转到行", defaultBinding: "Ctrl+G" },
   { id: "toggleFilterPanel", label: "显示/隐藏命中面板", defaultBinding: "Ctrl+Shift+F" },
   { id: "toggleSidebar", label: "显示/隐藏侧栏", defaultBinding: "Ctrl+Shift+B" },
   { id: "zoomIn", label: "放大字号", defaultBinding: "Ctrl+=" },

@@ -23,12 +23,13 @@ interface Props {
   onClose: () => void;
 }
 
-type TabId = "appearance" | "search" | "files" | "keys";
+type TabId = "appearance" | "search" | "files" | "layout" | "keys";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "appearance", label: "外观" },
   { id: "search", label: "搜索" },
   { id: "files", label: "文件" },
+  { id: "layout", label: "布局" },
   { id: "keys", label: "快捷键" },
 ];
 
@@ -320,6 +321,29 @@ export default function SettingsModal({ onClose }: Props) {
             </Row>
             <Row label="编码" desc="打开文件时生效;切换后需重新打开文件">
               <Select value={s.encoding} options={ENCODING_OPTIONS} onChange={(v) => set("encoding", v)} />
+            </Row>
+          </div>
+        )}
+
+        {tab === "layout" && (
+          <div className="settings-body">
+            <Row label="侧栏宽度" desc="左侧面板宽度,拖拽分隔条也可调整">
+              <Stepper value={s.sidebarWidth} min={160} max={480} step={10} unit="px" onChange={(v) => set("sidebarWidth", v)} />
+            </Row>
+            <Row label="命中面板高度" desc="底部搜索命中面板,拖拽也可调整">
+              <Stepper value={s.filterHeight} min={120} max={720} step={20} unit="px" onChange={(v) => set("filterHeight", v)} />
+            </Row>
+            <Row label="侧栏·固定" desc="显示固定(多文件聚合)区块">
+              <Toggle checked={s.sidebarSections.pins} onChange={(v) => set("sidebarSections", { ...s.sidebarSections, pins: v })} />
+            </Row>
+            <Row label="固定·按文件分组" desc="开启:按文件分节;关闭:所有文件的固定合并平铺">
+              <Toggle checked={s.sidebarSections.pinsByFile} onChange={(v) => set("sidebarSections", { ...s.sidebarSections, pinsByFile: v })} />
+            </Row>
+            <Row label="侧栏·注释" desc="显示备注注释聚合区块">
+              <Toggle checked={s.sidebarSections.notes} onChange={(v) => set("sidebarSections", { ...s.sidebarSections, notes: v })} />
+            </Row>
+            <Row label="注释·按文件分组" desc="开启:按文件分节;关闭:所有文件的注释合并平铺">
+              <Toggle checked={s.sidebarSections.notesByFile} onChange={(v) => set("sidebarSections", { ...s.sidebarSections, notesByFile: v })} />
             </Row>
           </div>
         )}

@@ -39,6 +39,8 @@ interface Props {
   height?: number | string;
   /** 文件总行数(上下文展开上限) */
   lineCount: number;
+  /** 当前激活命中行(1-based):跳转时命中列表跟随滚动到该项 */
+  activeHitLine?: number | null;
   /** 弹出为独立窗口按钮(仅主窗口内嵌版提供) */
   onPopout?: () => void;
   /** 收起内嵌面板按钮 */
@@ -67,6 +69,7 @@ export default function FilterView({
   onPopout,
   onCollapse,
   lineCount,
+  activeHitLine,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -124,6 +127,17 @@ export default function FilterView({
     const expanded = expandContext(hitLines, contextLines, lineCount);
     return expanded.length > MAX_DISPLAY_LINES ? expanded.slice(0, MAX_DISPLAY_LINES) : expanded;
   }, [hitLines, contextLines, lineCount]);
+
+  // 搜索跳转(‹›):命中列表跟随滚动到当前激活命中行(与文档视口联动)
+  useEffect(() => {
+    if (activeHitLine == null) return;
+    const idx = displayLines.indexOf(activeHitLine);
+    if (idx < 0 || !containerRef.current) return;
+    const el = containerRef.current;
+    const top = Math.max(0, idx * rowHeight - el.clientHeight / 2);
+    el.scrollTop = top;
+    setScrollTop(top);
+  }, [activeHitLine, displayLines, rowHeight]);
 
   const range = useMemo(() => {
     if (viewHeight === 0) return { start: 0, end: 0 };

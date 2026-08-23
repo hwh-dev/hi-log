@@ -19,6 +19,8 @@ interface Props {
   fetchLines: (start: number, count: number) => Promise<void>;
   /** 是否显示备注注释(设置里完全屏蔽) */
   showNotes: boolean;
+  /** 当前激活命中行(1-based),渲染 klogg 式光标条 */
+  activeHitLine?: number | null;
   /** 全局折叠所有备注注释(状态栏开关;仍可单个点 📝 展开) */
   globalCollapsed: boolean;
   /** 右键备注注释行(复制/编辑/删除菜单) */
@@ -37,7 +39,7 @@ const BUFFER = 10; // extra rows above/below viewport
 const NOTE_H = 16;
 
 const LogView = forwardRef<LogViewHandle, Props>(function LogView(
-  { lineCount, lineCache, highlightMap, marks, pins, followTail, onContextMenu, fetchLines, showNotes, globalCollapsed, onNoteContextMenu }: Props,
+  { lineCount, lineCache, highlightMap, marks, pins, followTail, onContextMenu, fetchLines, showNotes, globalCollapsed, onNoteContextMenu, activeHitLine }: Props,
   ref,
 ) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -248,7 +250,9 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
       result.push(
         <div
           key={i}
-          className={`log-line${i === flashLine ? " flash-line" : ""}`}
+          className={`log-line${i === flashLine ? " flash-line" : ""}${
+            activeHitLine != null && i === activeHitLine - 1 ? " hit-line" : ""
+          }`}
           style={{
             position: "absolute",
             top: y,
@@ -291,7 +295,7 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
       y += rowHeight;
     }
     return result;
-  }, [visibleRange, lineCache, highlightMap, marks, pins, onContextMenu, rowHeight, countNotesBefore, noteVisible]);
+  }, [visibleRange, lineCache, highlightMap, marks, pins, onContextMenu, rowHeight, countNotesBefore, noteVisible, activeHitLine]);
 
   const totalNotes = useMemo(() => {
     let c = 0;

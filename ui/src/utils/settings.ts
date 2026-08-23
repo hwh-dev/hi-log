@@ -46,6 +46,13 @@ export interface AppSettings {
   // 布局(高频写,静默不广播)
   filterHeight: number;
   sidebarWidth: number;
+  /** 侧栏区块显示开关 + 是否按文件分节(固定/注释独立) */
+  sidebarSections: {
+    pins: boolean;
+    notes: boolean;
+    pinsByFile: boolean;
+    notesByFile: boolean;
+  };
 }
 
 export const DEFAULT_FONT_FAMILY =
@@ -69,6 +76,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   keybindings: {},
   filterHeight: 220,
   sidebarWidth: 230,
+  sidebarSections: { pins: true, notes: true, pinsByFile: true, notesByFile: true },
 };
 
 // ── schema:每个设置项的存储 key / 解析(钳制与白名单)──
@@ -178,6 +186,24 @@ const SCHEMA: { [K in keyof AppSettings]: SettingDef<AppSettings[K]> } = {
     key: "hi-log.filter-height",
     def: 220,
     parse: (r) => clampNum(r, 220, 60, 100000),
+  },
+  sidebarSections: {
+    key: "hi-log.sidebar-sections",
+    def: { pins: true, notes: true, pinsByFile: true, notesByFile: true },
+    parse: (r) => {
+      try {
+        const o = JSON.parse(r ?? "{}");
+        return {
+          pins: typeof o.pins === "boolean" ? o.pins : true,
+          notes: typeof o.notes === "boolean" ? o.notes : true,
+          pinsByFile: typeof o.pinsByFile === "boolean" ? o.pinsByFile : true,
+          notesByFile: typeof o.notesByFile === "boolean" ? o.notesByFile : true,
+        };
+      } catch {
+        return { pins: true, notes: true, pinsByFile: true, notesByFile: true };
+      }
+    },
+    dump: (v) => JSON.stringify(v),
   },
   sidebarWidth: {
     key: "hi-log.sidebar-width",
@@ -350,6 +376,11 @@ export function loadRecentFiles(): string[] {
 }
 export function recordRecentFile(path: string, max = 10): string[] {
   const next = [path, ...loadRecentFiles().filter((p) => p !== path)].slice(0, max);
+  localStorage.setItem("hi-log.recent-files", JSON.stringify(next));
+  return next;
+}
+export function removeRecentFile(path: string): string[] {
+  const next = loadRecentFiles().filter((p) => p !== path);
   localStorage.setItem("hi-log.recent-files", JSON.stringify(next));
   return next;
 }

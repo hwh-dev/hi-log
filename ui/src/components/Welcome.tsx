@@ -9,6 +9,8 @@ interface Props {
   onOpenPath: (p: string) => void;
   dropActive: boolean;
   recentFiles: string[];
+  /** 从最近列表移除(×) */
+  onRemoveRecent: (path: string) => void;
 }
 
 export default function Welcome({
@@ -18,6 +20,7 @@ export default function Welcome({
   onOpenPath,
   dropActive,
   recentFiles,
+  onRemoveRecent,
 }: Props) {
   const fileName = (p: string) => p.split(/[/\\]/).pop() ?? p;
   const [pickerError, setPickerError] = useState(false);
@@ -78,6 +81,16 @@ export default function Welcome({
             <button key={p} className="recent-item" title={p} onClick={() => onOpenPath(p)}>
               <span className="recent-name">{fileName(p)}</span>
               <span className="recent-path">{p}</span>
+              <span
+                className="recent-remove"
+                title="从最近列表移除"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemoveRecent(p);
+                }}
+              >
+                ×
+              </span>
             </button>
           ))
         )}

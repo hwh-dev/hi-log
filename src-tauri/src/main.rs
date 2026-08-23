@@ -70,6 +70,13 @@ fn open_file(
     Ok(meta)
 }
 
+/// 关闭文件:从文档表驱逐(mmap 释放);marks/pins 留在 SQLite,重开仍在
+#[tauri::command]
+fn close_file(state: State<AppState>, file_id: String) -> Result<(), String> {
+    state.documents.lock().unwrap().remove(&file_id);
+    Ok(())
+}
+
 /// tail 模式的轻量轮询:只 stat 文件大小,不变就不重建索引
 #[tauri::command]
 fn file_size(path: String) -> Result<u64, String> {
@@ -732,6 +739,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_file,
+            close_file,
             file_size,
             get_lines,
             start_search,

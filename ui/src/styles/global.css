@@ -227,9 +227,9 @@ button {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 32px;
-  padding: 24px;
+  /* 顶部固定布局(不垂直居中):输入框位置稳定,
+     最近打开列表增删不会引起输入框上下跳动 */
+  padding: 9vh 24px 24px;
   overflow-y: auto;
 }
 
@@ -377,6 +377,19 @@ button {
   white-space: nowrap;
 }
 
+.recent-remove {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+
+.recent-remove:hover {
+  color: var(--close-hover);
+}
+
 .recent-empty {
   padding: 8px;
   font-size: 11px;
@@ -436,6 +449,11 @@ button {
 
 .log-line:hover {
   background: var(--bg-hover);
+}
+
+/* 搜索跳转命中光标(klogg 式左侧强调条):指示当前激活命中行 */
+.log-line.hit-line {
+  box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 9999px var(--accent-soft);
 }
 
 /* 跳转落点高亮:标记/快照/固定点击跳转后,目标行短暂高亮提示。
@@ -815,6 +833,16 @@ button {
   color: var(--text-primary);
 }
 
+.pin-item-file {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 9px;
+  max-width: 48px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pin-item-text {
   flex-basis: 100%;
   min-width: 0;
@@ -829,12 +857,14 @@ button {
 /* ── pin dot in log lines(书签圆点,区别于标记的左侧色条)── */
 
 .pin-dot {
-  flex-shrink: 0;
+  /* 绝对定位覆盖在行号左侧空位:不占流,固定行文本不再缩进 */
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 6px;
   height: 6px;
   background: var(--accent);
-  margin-right: 6px;
-  align-self: center;
 }
 
 /* ── mark gutter in log lines ── */
@@ -1093,6 +1123,17 @@ button {
 
 .toggle:hover {
   border-color: var(--text-dim);
+}
+
+.toggle.hit-nav {
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 8px;
+}
+
+.toggle.hit-nav:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .toggle.active {
@@ -1403,6 +1444,69 @@ mark {
 
 .filter-resizer:hover {
   background: var(--accent);
+}
+
+/* ── 分屏(左右并排)── */
+
+.split-resizer {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.split-resizer:hover {
+  background: var(--accent);
+}
+
+.split-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+/* 焦点右栏:左侧强调条提示"搜索作用于此栏" */
+.split-pane.focused {
+  border-left-color: var(--accent);
+}
+
+.split-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 6px 0 10px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.split-file {
+  font-size: 11px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.split-spacer {
+  flex: 1;
+}
+
+.split-close {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.split-close:hover {
+  color: var(--close-hover);
 }
 
 /* ── 面板通用工具按钮(弹出/收起)── */
@@ -1839,4 +1943,152 @@ mark {
   border: 1px solid var(--border);
   color: var(--text-secondary);
   font-size: 10px;
+}
+
+/* ── 侧栏区段(VS Code 风:header 可折叠整体)── */
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+/* 折叠的区段:收起为一行 header,不再占剩余空间 */
+.sidebar-section.collapsed {
+  flex: 0 0 auto;
+}
+
+.sidebar-section-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px 3px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.sidebar-section-head:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.sidebar-section-arrow {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 8px;
+  line-height: 1;
+  width: 14px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.sidebar-section-arrow:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-section-title {
+  letter-spacing: 0.06em;
+}
+
+.sidebar-section-count {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+/* 区段头视图切换(按文件分节 ⇄ 合并) */
+.section-view-toggle {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  padding: 1px 4px;
+  flex-shrink: 0;
+}
+
+.section-view-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* ── 侧栏聚合:固定/注释(多文件分节,点击跳转)── */
+
+.pins-aggregate,
+.notes-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.pins-file,
+.notes-file {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.pins-file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 12px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.pins-file-head.active {
+  color: var(--accent);
+}
+
+.pins-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pins-file-count {
+  color: var(--text-dim);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.note-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 12px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.note-item:hover {
+  background: var(--bg-hover);
+}
+
+.note-item-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-style: italic;
 }

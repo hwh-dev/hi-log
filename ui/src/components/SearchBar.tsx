@@ -23,6 +23,10 @@ interface Props {
   /** 命中面板是否可见;点击切换折叠/展开(弹出窗口打开时点击收回) */
   filterVisible: boolean;
   onToggleFilter: () => void;
+  /** klogg 式跳转:上一个/下一个命中 */
+  onPrevHit?: () => void;
+  onNextHit?: () => void;
+  hasHits?: boolean;
   /** 按给定词立即搜索(历史点击/上下键选择时用当前选项) */
   onApplyQuery: (q: string, regex: boolean, caseSensitive: boolean) => void;
   /** 外部聚焦引用(快捷键 Ctrl+F 聚焦搜索栏) */
@@ -64,6 +68,9 @@ export default function SearchBar({
   onToggleFilter,
   onApplyQuery,
   inputRef,
+  onPrevHit,
+  onNextHit,
+  hasHits,
 }: Props) {
   const pct = progress && progress.total > 0
     ? Math.round((progress.scanned / progress.total) * 100)
@@ -257,6 +264,28 @@ export default function SearchBar({
       >
         Aa
       </button>
+
+      {/* klogg 式:跳转上一个/下一个命中 */}
+      {onPrevHit && (
+        <button
+          className="toggle hit-nav"
+          title="上一个命中 (Shift+F6)"
+          disabled={!hasHits}
+          onClick={onPrevHit}
+        >
+          ‹
+        </button>
+      )}
+      {onNextHit && (
+        <button
+          className="toggle hit-nav"
+          title="下一个命中 (F6)"
+          disabled={!hasHits}
+          onClick={onNextHit}
+        >
+          ›
+        </button>
+      )}
 
       {running ? (
         <>
