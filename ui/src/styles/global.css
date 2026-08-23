@@ -405,6 +405,35 @@ button {
   border-left: 3px solid transparent;
 }
 
+/* 备注注释行:渲染在日志行上方,代码注释风格(灰斜体小字),与日志内容区分,不写入文件 */
+.log-note {
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* 对齐日志文本列(8 边距 + 48 行号 + 10 间隔 + 18 标记位) */
+  padding-left: 86px;
+  line-height: 16px;
+  font-size: 10px;
+  font-style: italic;
+  color: var(--text-dim);
+  /* 不突兀:无整行背景,仅左侧淡色竖线做"注释"区分 */
+  border-left: 2px solid var(--accent-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text; /* 可选中复制 */
+  cursor: text;
+}
+
+/* 点击折叠:收起为 📝 图标(行高不变,虚拟滚动无需重排) */
+.log-note.note-collapsed {
+  cursor: pointer;
+}
+
+.log-note:hover {
+  background: var(--bg-hover);
+}
+
 .log-line:hover {
   background: var(--bg-hover);
 }
@@ -1163,13 +1192,14 @@ mark {
   align-items: center;
   gap: 5px;
   max-width: 220px;
+  min-width: 0;
   padding: 2px 3px 2px 7px;
   border: 1px solid var(--border);
   background: var(--bg-input);
   font-size: 10px;
   color: var(--text-secondary);
   cursor: pointer;
-  flex-shrink: 0;
+  flex-shrink: 1; /* 可收缩:长 query 截断,多个 chip 单行铺满不换行 */
 }
 
 .session-chip:hover {
@@ -1189,6 +1219,8 @@ mark {
 }
 
 .chip-q {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1197,6 +1229,7 @@ mark {
 .chip-count {
   font-weight: 700;
   opacity: 0.85;
+  flex-shrink: 0;
 }
 
 .chip-close {
@@ -1208,6 +1241,7 @@ mark {
   padding: 0 2px;
   cursor: pointer;
   opacity: 0.55;
+  flex-shrink: 0;
 }
 
 .chip-close:hover {

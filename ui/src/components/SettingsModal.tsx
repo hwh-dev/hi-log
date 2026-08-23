@@ -281,6 +281,9 @@ export default function SettingsModal({ onClose }: Props) {
             <Row label="行距" desc={`行高 = 字号 + 行距(当前 ${rowHeight(s)}px)`}>
               <Stepper value={s.rowSpacing} min={5} max={14} step={1} unit="px" onChange={(v) => set("rowSpacing", v)} />
             </Row>
+            <Row label="备注注释" desc="关闭后完全不显示备注注释(含行内 📝);开启后可用状态栏按钮全局折叠">
+              <Toggle checked={s.showNotes} onChange={(v) => set("showNotes", v)} />
+            </Row>
           </div>
         )}
 

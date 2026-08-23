@@ -232,9 +232,11 @@ export default function SidebarPopout() {
       <div className="popout-header" data-tauri-drag-region>
         <span className="popout-title">快照与固定</span>
         <span className="popout-spacer" />
-        <button className="popout-close" onClick={() => appWindow.close()} title="关闭窗口">
-          ×
-        </button>
+        <div className="win-controls">
+          <button onClick={() => appWindow.minimize()} aria-label="minimize">─</button>
+          <button onClick={() => appWindow.toggleMaximize()} aria-label="maximize">□</button>
+          <button className="close" onClick={() => appWindow.close()} aria-label="close">×</button>
+        </div>
       </div>
       <div className="popout-body sidebar">
         <SnapshotsPanel

@@ -362,14 +362,16 @@ export default function FilterPopout() {
   return (
     <div className="popout">
       <div className="popout-header" data-tauri-drag-region>
-        <span className="popout-title">FILTER</span>
+        <span className="popout-title">搜索命中</span>
         <span className="popout-info">
           {active ? `${active.hitCount.toLocaleString()}${active.truncated ? "+" : ""} 命中` : "无搜索"}
         </span>
         <span className="popout-spacer" />
-        <button className="popout-close" onClick={() => appWindow.close()} title="关闭窗口">
-          ×
-        </button>
+        <div className="win-controls">
+          <button onClick={() => appWindow.minimize()} aria-label="minimize">─</button>
+          <button onClick={() => appWindow.toggleMaximize()} aria-label="maximize">□</button>
+          <button className="close" onClick={() => appWindow.close()} aria-label="close">×</button>
+        </div>
       </div>
       <div className="popout-body">
         <FilterView

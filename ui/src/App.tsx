@@ -121,6 +121,10 @@ export default function App() {
   const [activeId, setActiveId] = useState<number | null>(null);
   /** tail 模式:文件追加自动加载 + 视口跟随 + 激活搜索自动重扫 */
   const [tailMode, setTailMode] = useState(false);
+  /** 备注注释:是否显示(设置里完全屏蔽);状态栏按钮是"全局折叠"开关 */
+  const showNotes = useSettings((s) => s.showNotes);
+  /** 状态栏按钮:全局折叠所有备注注释(仍可单个展开) */
+  const [globalCollapsed, setGlobalCollapsed] = useState(false);
   const searchIdRef = useRef<number | null>(null);
   /** tail 重搜的被替换会话 id(search_done 后并入并删除新会话) */
   const tailReplaceRef = useRef<number | null>(null);
@@ -171,6 +175,8 @@ export default function App() {
   // ── marks state(仅用于日志行着色与右键,侧栏不再列示)──
   const [marks, setMarks] = useState<MarkMap>({});
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  /** 备注注释行右键菜单(复制/编辑/删除) */
+  const [noteCtx, setNoteCtx] = useState<{ lineNo: number; x: number; y: number } | null>(null);
   /** 自绘输入弹窗(备注/命名等,替换原生 prompt) */
   const [promptCfg, setPromptCfg] = useState<PromptConfig | null>(null);
   /** 自绘确认弹窗(自动更新,替换原生 confirm) */
@@ -1051,6 +1057,22 @@ export default function App() {
     [fileMeta],
   );
 
+  // 复制文本:WebView2 下 navigator.clipboard 可能缺安全上下文,用 execCommand 兜底
+  const copyText = (t: string) => {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch {
+      /* 忽略失败 */
+    }
+    document.body.removeChild(ta);
+  };
+
   const addNoteAction = useCallback(
     (lineNo: number, color: number) => {
       if (!fileMeta) return;
@@ -1276,6 +1298,9 @@ export default function App() {
                 marks={marks}
                 pins={pinSet}
                 followTail={tailMode}
+                showNotes={showNotes}
+                globalCollapsed={globalCollapsed}
+                onNoteContextMenu={(lineNo, x, y) => setNoteCtx({ lineNo, x, y })}
                 onContextMenu={handleLogContextMenu}
                 fetchLines={fetchLines}
               />
@@ -1375,6 +1400,63 @@ export default function App() {
         );
       })()}
 
+      {noteCtx && (() => {
+        const m = marks[noteCtx.lineNo];
+        return (
+          <div
+            className="ctx-backdrop"
+            onClick={() => setNoteCtx(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setNoteCtx(null);
+            }}
+          >
+            <div
+              className="ctx-menu"
+              style={{ left: noteCtx.x, top: noteCtx.y }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="ctx-title">第 {noteCtx.lineNo} 行备注</div>
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  copyText(m?.note ?? "");
+                  setNoteCtx(null);
+                }}
+              >
+                复制备注
+              </button>
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  addNoteAction(noteCtx.lineNo, m?.color ?? 0);
+                  setNoteCtx(null);
+                }}
+              >
+                编辑备注…
+              </button>
+              <button
+                className="ctx-item danger"
+                onClick={() => {
+                  // 删除注释:仅清空备注文本,保留颜色标记(add_mark 为 upsert,note 置空)
+                  if (m && fileMeta) {
+                    void invoke("add_mark", {
+                      fileId: fileMeta.id,
+                      lineNo: noteCtx.lineNo,
+                      color: m.color,
+                      note: "",
+                    }).catch((e) => console.error("clear note failed", e));
+                  }
+                  setNoteCtx(null);
+                }}
+              >
+                删除注释
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
       {promptCfg && <PromptModal {...promptCfg} onClose={() => setPromptCfg(null)} />}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
@@ -1412,6 +1494,13 @@ export default function App() {
             title="tail 模式:文件追加自动加载,视口跟随底部,激活搜索自动重扫"
           >
             TAIL
+          </button>
+          <button
+            className={`theme-toggle ${globalCollapsed ? "active" : ""}`}
+            onClick={() => setGlobalCollapsed((v) => !v)}
+            title="全局折叠/展开所有备注注释(单个仍可点 📝 展开;完全屏蔽在设置里)"
+          >
+            注释
           </button>
           <button
             className="theme-toggle"

@@ -17,6 +17,12 @@ interface Props {
   /** 右键某行日志 */
   onContextMenu: (lineNo: number, x: number, y: number) => void;
   fetchLines: (start: number, count: number) => Promise<void>;
+  /** 是否显示备注注释(设置里完全屏蔽) */
+  showNotes: boolean;
+  /** 全局折叠所有备注注释(状态栏开关;仍可单个点 📝 展开) */
+  globalCollapsed: boolean;
+  /** 右键备注注释行(复制/编辑/删除菜单) */
+  onNoteContextMenu: (lineNo: number, x: number, y: number) => void;
 }
 
 export interface LogViewHandle {
@@ -27,8 +33,11 @@ export interface LogViewHandle {
 
 const BUFFER = 10; // extra rows above/below viewport
 
+// 备注注释行高度(在日志行上方渲染的"代码注释"样式,不写入文件)
+const NOTE_H = 16;
+
 const LogView = forwardRef<LogViewHandle, Props>(function LogView(
-  { lineCount, lineCache, highlightMap, marks, pins, followTail, onContextMenu, fetchLines }: Props,
+  { lineCount, lineCache, highlightMap, marks, pins, followTail, onContextMenu, fetchLines, showNotes, globalCollapsed, onNoteContextMenu }: Props,
   ref,
 ) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -36,6 +45,38 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   const [viewportHeight, setViewportHeight] = useState(0);
   const fetchingRef = useRef(false);
   const prevCountRef = useRef(lineCount);
+  // 折叠状态(1-based line_no):
+  // 非全局折叠:collapsedNotes 记录被单条折叠的行;
+  // 全局折叠(globalCollapsed):expandedNotes 记录被单条展开的行(默认都收起)。
+  const [collapsedNotes, setCollapsedNotes] = useState<Set<number>>(new Set());
+  const [expandedNotes, setExpandedNotes] = useState<Set<number>>(new Set());
+  /** 该行注释是否显示(设置屏蔽 / 全局折叠与单条覆盖共同决定) */
+  const noteVisible = useCallback(
+    (line1: number): boolean => {
+      if (!showNotes) return false;
+      if (globalCollapsed) return expandedNotes.has(line1);
+      return !collapsedNotes.has(line1);
+    },
+    [showNotes, globalCollapsed, expandedNotes, collapsedNotes],
+  );
+  /** 行内 📝 双向切换:折叠 ↔ 展开(折叠交互只走图标,避免与选中文本冲突) */
+  const toggleNote = (line1: number) => {
+    if (globalCollapsed) {
+      setExpandedNotes((prev) => {
+        const next = new Set(prev);
+        if (next.has(line1)) next.delete(line1);
+        else next.add(line1);
+        return next;
+      });
+    } else {
+      setCollapsedNotes((prev) => {
+        const next = new Set(prev);
+        if (next.has(line1)) next.delete(line1);
+        else next.add(line1);
+        return next;
+      });
+    }
+  };
   // 跳转高亮(标记/快照/固定点击跳转后,目标行短暂高亮提示)
   const [flashLine, setFlashLine] = useState<number | null>(null);
   const flashTimerRef = useRef<number | null>(null);
@@ -99,13 +140,29 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
     flashTimerRef.current = window.setTimeout(() => setFlashLine(null), 1600);
   }, []);
 
+  // 统计某行(0-based i0)之前"可见"的备注行数,用于虚拟滚动叠加注释行高度。
+  // 折叠的注释行高度为 0(真折叠:行紧贴),不计入。
+  const countNotesBefore = useCallback(
+    (i0: number) => {
+      let c = 0;
+      for (const k in marks)
+        if (marks[k]?.note && noteVisible(Number(k)) && Number(k) - 1 < i0) c++;
+      return c;
+    },
+    [marks, noteVisible],
+  );
+
   useImperativeHandle(
     ref,
     () => ({
       scrollToLine(lineNo0: number) {
         const el = viewportRef.current;
         if (!el) return;
-        const top = Math.max(0, lineNo0 * rowHeight - viewportHeight / 3);
+        // 叠加目标行之前的注释行高度,跳转定位更准
+        const top = Math.max(
+          0,
+          lineNo0 * rowHeight + countNotesBefore(lineNo0) * NOTE_H - viewportHeight / 3,
+        );
         el.scrollTop = top; // 同步赋值,避免 scrollTo 异步时序
         setScrollTop(top);
         // 预取目标行附近,避免跳转后屏幕空白等待 fetch
@@ -116,7 +173,7 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
         return Math.floor((viewportRef.current?.scrollTop ?? 0) / rowHeight);
       },
     }),
-    [viewportHeight, fetchLines, rowHeight, flashAt],
+    [viewportHeight, fetchLines, rowHeight, flashAt, countNotesBefore],
   );
 
   // Update scroll position
@@ -161,7 +218,29 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   // Build visible rows
   const rows = useMemo(() => {
     const result: React.ReactNode[] = [];
+    // 游标定位:起始 top 叠加前面注释行高度,带注释的行在行上方插一条注释
+    let y = visibleRange.start * rowHeight + countNotesBefore(visibleRange.start) * NOTE_H;
     for (let i = visibleRange.start; i < visibleRange.end; i++) {
+      const note = marks[i + 1]?.note;
+      // 真折叠:折叠的注释行不渲染(高度为 0,上下行紧贴);
+      // 折叠/展开只走行内 📝 图标(toggleNote),避免与选中文本冲突
+      if (showNotes && note && noteVisible(i + 1)) {
+        result.push(
+          <div
+            key={`note-${i}`}
+            className="log-note"
+            style={{ position: "absolute", top: y, height: NOTE_H }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              onNoteContextMenu(i + 1, e.clientX, e.clientY);
+            }}
+            title="右键复制/编辑/删除,点击行内 📝 折叠"
+          >
+            {note}
+          </div>,
+        );
+        y += NOTE_H;
+      }
       const text = lineCache[i];
       const ranges = highlightMap[i + 1];
       const mark = marks[i + 1];
@@ -172,7 +251,7 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
           className={`log-line${i === flashLine ? " flash-line" : ""}`}
           style={{
             position: "absolute",
-            top: i * rowHeight,
+            top: y,
             height: rowHeight,
             borderLeftColor: markColor,
             // 标记行整行着色(8 位 hex alpha ≈ 13%),一眼可辨
@@ -185,17 +264,41 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
         >
           {pins.has(i + 1) && <span className="pin-dot" title="已固定" />}
           <span className="line-no">{String(i + 1).padStart(7, " ")}</span>
-          <span className="line-mark-icon">{mark?.note ? "📝" : ""}</span>
+          <span
+            className="line-mark-icon"
+            title={
+              mark?.note
+                ? noteVisible(i + 1)
+                  ? "点击折叠该条备注"
+                  : `${mark.note}(点击展开)`
+                : undefined
+            }
+            onClick={(e) => {
+              // 行内 📝 双向切换:折叠时点击展开,展开时点击折叠(唯一折叠入口,避免与选中冲突)
+              if (mark?.note) {
+                e.stopPropagation();
+                toggleNote(i + 1);
+              }
+            }}
+          >
+            {mark?.note ? "📝" : ""}
+          </span>
           <span className="line-text">
             {text ? (ranges ? highlightText(text, ranges, `hl-${i + 1}`) : text) : ""}
           </span>
         </div>
       );
+      y += rowHeight;
     }
     return result;
-  }, [visibleRange, lineCache, highlightMap, marks, pins, onContextMenu, rowHeight]);
+  }, [visibleRange, lineCache, highlightMap, marks, pins, onContextMenu, rowHeight, countNotesBefore, noteVisible]);
 
-  const totalHeight = lineCount * rowHeight;
+  const totalNotes = useMemo(() => {
+    let c = 0;
+    for (const k in marks) if (marks[k]?.note && noteVisible(Number(k))) c++;
+    return c;
+  }, [marks, noteVisible]);
+  const totalHeight = lineCount * rowHeight + totalNotes * NOTE_H;
 
   return (
     <div className="log-viewport" ref={viewportRef} onScroll={handleScroll}>

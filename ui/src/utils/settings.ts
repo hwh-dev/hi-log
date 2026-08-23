@@ -26,6 +26,8 @@ export interface AppSettings {
   fontSize: number;
   /** 行距 px(5-14);行高 = fontSize + rowSpacing(13+9=22,与初版一致) */
   rowSpacing: number;
+  /** 显示备注注释行(完全屏蔽;关闭则连行内 📝 也不显示) */
+  showNotes: boolean;
   // 搜索
   regexDefault: boolean;
   caseDefault: boolean;
@@ -54,6 +56,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: 13,
   rowSpacing: 9,
+  showNotes: true,
   regexDefault: false,
   caseDefault: false,
   contextLines: 0,
@@ -107,6 +110,11 @@ const SCHEMA: { [K in keyof AppSettings]: SettingDef<AppSettings[K]> } = {
     key: "hi-log.row-spacing",
     def: 9,
     parse: (r) => clampNum(r, 9, 5, 14),
+  },
+  showNotes: {
+    key: "hi-log.show-notes",
+    def: true,
+    parse: (r) => (r === null ? true : r !== "false"),
   },
   regexDefault: {
     key: "hi-log.regex-default",
