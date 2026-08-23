@@ -114,14 +114,13 @@ export default function SearchBar({
     setSuggestOpen(true);
   };
 
-  /** 移动高亮并把历史词实时填入输入框;next=-1 恢复用户原文 */
+  /** 移动高亮;输入框保持用户原文,只有 Enter 确定才用历史词(避免未确认时误改) */
   const moveHi = (next: number) => {
     if (next === -1) {
       setHi(-1);
       setQuery(userText);
     } else if (list[next]) {
       setHi(next);
-      setQuery(list[next]);
     }
   };
 
@@ -154,16 +153,19 @@ export default function SearchBar({
             if (e.key === "ArrowDown") {
               e.preventDefault();
               if (!suggestOpen) {
-                // 打开并定位:当前文本在历史中 → 高亮它,否则从第一项开始
+                // 打开列表:↓ 从顶部第一项开始顺走
                 startBrowse(query.trim() ? filtered : history);
-                const idx = list.indexOf(query);
-                moveHi(idx >= 0 ? idx : 0);
+                moveHi(0);
               } else {
                 moveHi(Math.min(hi + 1, list.length - 1));
               }
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
-              if (suggestOpen) {
+              if (!suggestOpen) {
+                // 打开列表:↑ 从贴输入框(最近历史)开始,向上翻 — 符合直觉
+                startBrowse(query.trim() ? filtered : history);
+                moveHi(list.length - 1);
+              } else {
                 moveHi(Math.max(hi - 1, -1));
               }
             } else if (e.key === "Escape") {
@@ -172,8 +174,9 @@ export default function SearchBar({
               setHi(-1);
               setQuery(userText);
             } else if (e.key === "Enter") {
-              // 正在浏览历史 → 搜浏览中的词;否则搜当前输入
-              if (suggestOpen && browsing && hi >= 0) {
+              // 有高亮的历史项(悬停/↑↓ 选中)且列表开着 → 带上该词搜索;
+              // 否则搜当前输入。不依赖 browsing 状态,避免悬停态时序丢失。
+              if (suggestOpen && hi >= 0 && list[hi]) {
                 pickAndSearch(list[hi]);
               } else {
                 recordHistory(query);
@@ -212,8 +215,12 @@ export default function SearchBar({
                 key={h}
                 className={`suggest-item ${i === hi ? "active" : ""}`}
                 onMouseEnter={() => {
+                  // 悬停视作浏览:Enter 才带上该历史词;输入框保持原文
+                  if (!browsing) {
+                    browseRef.current = list;
+                    setBrowsing(true);
+                  }
                   setHi(i);
-                  setQuery(list[i]); // 悬停即填入(与键盘行为一致)
                 }}
                 onMouseDown={() => pickAndSearch(h)}
               >

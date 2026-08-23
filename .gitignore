@@ -16,6 +16,7 @@ panel.log
 eu.json
 *.log
 shot-linux.png
+.debug/
 
 # ── 编辑器/系统 ──
 .vscode/
@@ -30,3 +31,4 @@ Thumbs.db
 *.pem
 *.key
 credentials*
+/logs

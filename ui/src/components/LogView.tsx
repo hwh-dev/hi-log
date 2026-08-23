@@ -36,6 +36,9 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   const [viewportHeight, setViewportHeight] = useState(0);
   const fetchingRef = useRef(false);
   const prevCountRef = useRef(lineCount);
+  // 跳转高亮(标记/快照/固定点击跳转后,目标行短暂高亮提示)
+  const [flashLine, setFlashLine] = useState<number | null>(null);
+  const flashTimerRef = useRef<number | null>(null);
   // 行高 = 字号 + 行距(设置层唯一公式);字号/行距变化 → 组件重渲 + 滚动换算同步
   const rowHeight = useSettings((s) => s.fontSize + s.rowSpacing);
 
@@ -89,6 +92,13 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
+  // 高亮指定行(0-based):短暂高亮后自动复位,提示跳转落点
+  const flashAt = useCallback((lineNo0: number) => {
+    setFlashLine(lineNo0);
+    if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => setFlashLine(null), 1600);
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -100,12 +110,13 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
         setScrollTop(top);
         // 预取目标行附近,避免跳转后屏幕空白等待 fetch
         void fetchLines(Math.max(0, lineNo0 - 20), 41);
+        flashAt(lineNo0); // 跳转落点高亮提示
       },
       getFirstLine() {
         return Math.floor((viewportRef.current?.scrollTop ?? 0) / rowHeight);
       },
     }),
-    [viewportHeight, fetchLines, rowHeight],
+    [viewportHeight, fetchLines, rowHeight, flashAt],
   );
 
   // Update scroll position
@@ -158,7 +169,7 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
       result.push(
         <div
           key={i}
-          className="log-line"
+          className={`log-line${i === flashLine ? " flash-line" : ""}`}
           style={{
             position: "absolute",
             top: i * rowHeight,

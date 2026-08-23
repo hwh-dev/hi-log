@@ -361,7 +361,7 @@ export default function FilterPopout() {
 
   return (
     <div className="popout">
-      <div className="popout-header">
+      <div className="popout-header" data-tauri-drag-region>
         <span className="popout-title">FILTER</span>
         <span className="popout-info">
           {active ? `${active.hitCount.toLocaleString()}${active.truncated ? "+" : ""} 命中` : "无搜索"}
@@ -380,6 +380,7 @@ export default function FilterPopout() {
           onClearSessions={clearSessions}
           lineCache={lineCache}
           highlightMap={active?.highlightMap ?? {}}
+          marks={marks}
           fetchLines={fetchLines}
           onJump={jump}
           onContextMenu={(lineNo, x, y) => setCtxMenu({ lineNo, x, y })}

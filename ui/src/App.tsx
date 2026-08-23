@@ -307,6 +307,8 @@ export default function App() {
     void (async () => {
       await invoke("open_panel", { kind });
       setPopoutOpen((p) => ({ ...p, [kind]: true }));
+      // 侧栏弹出:主窗口侧栏收起(内容移至独立窗口,避免两处重复)
+      if (kind === "sidebar") setSidebarVisible(false);
       // 打开即重发完整快照:Linux 弹窗是新窗口(初始状态靠快照),
       // Windows 是常驻隐藏窗口(关闭期间错过的事件由快照补齐)
       if (kind === "filter") {
@@ -320,6 +322,16 @@ export default function App() {
               sessions: snap.sessions,
               activeId: snap.activeId,
             })
+            .catch(() => {});
+        }
+      }
+      if (kind === "sidebar") {
+        // 重发 fileId:Windows 常驻弹窗挂载时主窗口可能尚未打开文件,
+        // panel_ready 的 sidebar_snapshot 被跳过;此处补齐,弹窗据此加载固定
+        const meta = fileMetaRef.current;
+        if (meta) {
+          void appWindow
+            .emitTo("sidebar-popout", "sidebar_snapshot", { fileId: meta.id })
             .catch(() => {});
         }
       }
@@ -337,6 +349,8 @@ export default function App() {
       if (kind) {
         popoutOpenRef.current = { ...popoutOpenRef.current, [kind]: false };
         setPopoutOpen((p) => ({ ...p, [kind]: false }));
+        // 侧栏弹窗关闭:主窗口侧栏恢复内嵌
+        if (kind === "sidebar") setSidebarVisible(true);
       }
     }).then((fn) => unlisteners.push(fn));
     return () => {
@@ -468,6 +482,16 @@ export default function App() {
       if (!fileMeta) return;
       await invoke("reorder_pins", { fileId: fileMeta.id, groupId, ids }).catch((e) =>
         console.error("reorder_pins failed", e),
+      );
+    },
+    [fileMeta],
+  );
+
+  const reorderGroupsAction = useCallback(
+    async (ids: number[]) => {
+      if (!fileMeta) return;
+      await invoke("reorder_pin_groups", { fileId: fileMeta.id, ids }).catch((e) =>
+        console.error("reorder_pin_groups failed", e),
       );
     },
     [fileMeta],
@@ -709,23 +733,40 @@ export default function App() {
           opts: { regex: r, caseSensitive: c },
         });
         searchIdRef.current = id;
-        // 新会话置顶(Notepad++ 风格:每次搜索一个新会话,旧结果保留可对比)
-        setSessions((prev) =>
-          [
-            {
-              id,
-              query: q,
-              regex: r,
-              caseSensitive: c,
-              hitCount: 0,
-              truncated: false,
-              highlightMap: {},
-              running: true,
-              progress: null,
-            },
-            ...prev,
-          ].slice(0, MAX_SESSIONS),
+        // 相同查询(词+正则+大小写一致)的既有会话:复用刷新,而非新建。
+        // 避免"搜了 INFO 又搜 INFO"无限开新窗口 —— 重复同词应刷新原结果。
+        const reuse = sessionsRef.current.find(
+          (s) => !s.running && s.query === q && s.regex === r && s.caseSensitive === c,
         );
+
+        if (reuse) {
+          // 把该会话重置为 running 态:清空旧命中并换上新 search_id,位置不变
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === reuse.id
+                ? { ...s, id, running: true, hitCount: 0, truncated: false, highlightMap: {}, progress: null }
+                : s,
+            ),
+          );
+        } else {
+          // 新会话置顶(Notepad++ 风格:每次新词一个新会话,旧结果保留可对比)
+          setSessions((prev) =>
+            [
+              {
+                id,
+                query: q,
+                regex: r,
+                caseSensitive: c,
+                hitCount: 0,
+                truncated: false,
+                highlightMap: {},
+                running: true,
+                progress: null,
+              },
+              ...prev,
+            ].slice(0, MAX_SESSIONS),
+          );
+        }
         setActiveId(id);
         // 通知命中弹窗:新搜索会话(词/选项一并带上);未打开不转发
         if (popoutOpenRef.current.filter) {
@@ -1189,7 +1230,7 @@ export default function App() {
                 <>
                   <div className="sidebar" style={{ width: sidebarWidth }}>
                     <div className="sidebar-toolbar">
-                      <span className="sidebar-toolbar-title">PANELS</span>
+                      <span className="sidebar-toolbar-title">面板</span>
                       <button
                         className="panel-btn"
                         onClick={() => openPanel("sidebar")}
@@ -1215,6 +1256,7 @@ export default function App() {
                       onNewGroup={() => void newPinGroupAction()}
                       onDeleteGroup={deletePinGroupAction}
                       onReorder={reorderPinsAction}
+                      onReorderGroups={reorderGroupsAction}
                       onMoveToGroup={movePinAction}
                     />
                   </div>
@@ -1256,6 +1298,7 @@ export default function App() {
                 onClearSessions={clearSessions}
                 lineCache={lineCache}
                 highlightMap={activeHighlightMap}
+                marks={marks}
                 fetchLines={fetchLines}
                 onJump={(l) => logViewRef.current?.scrollToLine(l)}
                 onContextMenu={(lineNo, x, y) => setCtxMenu({ lineNo, x, y })}

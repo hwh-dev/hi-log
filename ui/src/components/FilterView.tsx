@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from "react";
 import { highlightText } from "../utils/highlight";
+import { paletteColor, type Mark } from "../utils/palette";
 import { useSettings, getSettings, setSetting, expandContext } from "../utils/settings";
 
 /** 搜索会话(Notepad++ Search Results 风格,多会话并存) */
@@ -25,6 +26,8 @@ interface Props {
   lineCache: Record<number, string>;
   /** 行号(1-based) → 匹配字节区间(仅激活会话需要) */
   highlightMap: Record<number, [number, number][]>;
+  /** 行号(1-based) → 标记(命中行左侧色条) */
+  marks: Record<number, Mark>;
   fetchLines: (start: number, count: number) => Promise<void>;
   onJump: (lineNo0: number) => void;
   /** 右键命中行(标记) */
@@ -54,6 +57,7 @@ export default function FilterView({
   onClearSessions,
   lineCache,
   highlightMap,
+  marks,
   fetchLines,
   onJump,
   onContextMenu,
@@ -231,11 +235,19 @@ export default function FilterView({
               const lineNo0 = ln - 1;
               const text = lineCache[lineNo0] ?? "";
               const isHit = ln in highlightMap;
+              const mark = marks[ln];
+              const markColor = mark ? paletteColor(mark.color) : undefined;
               return (
                 <div
                   key={ln}
                   className={`filter-row ${isHit ? "" : "ctx"}`}
-                  style={{ position: "absolute", top: (range.start + idx) * rowHeight, height: rowHeight }}
+                  style={{
+                    position: "absolute",
+                    top: (range.start + idx) * rowHeight,
+                    height: rowHeight,
+                    borderLeftColor: markColor,
+                    backgroundColor: markColor ? `${markColor}22` : undefined,
+                  }}
                   title={text}
                   onClick={() => onJump(lineNo0)}
                   onContextMenu={(e) => {
@@ -244,6 +256,7 @@ export default function FilterView({
                   }}
                 >
                   <span className="filter-line-no">{String(ln).padStart(7, " ")}</span>
+                  <span className="line-mark-icon">{mark?.note ? "📝" : ""}</span>
                   <span className="filter-text">
                     {text ? (isHit ? highlightText(text, highlightMap[ln] ?? [], `f-${ln}`) : text) : text}
                   </span>

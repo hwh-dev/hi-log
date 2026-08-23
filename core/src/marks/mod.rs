@@ -91,9 +91,10 @@ impl MarkStore {
             CREATE INDEX IF NOT EXISTS idx_marks_file ON marks(file_id);
 
             CREATE TABLE IF NOT EXISTS pin_groups (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id TEXT NOT NULL,
-                name    TEXT NOT NULL,
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id  TEXT NOT NULL,
+                name     TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(file_id, name)
             );
             CREATE INDEX IF NOT EXISTS idx_pin_groups_file ON pin_groups(file_id);
@@ -120,6 +121,19 @@ impl MarkStore {
         if !has_name {
             conn.execute(
                 "ALTER TABLE pins ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        // 分组排序列(拖拽调整分组顺序):旧库无 position 列则补
+        let has_pos: bool = conn
+            .prepare("PRAGMA table_info(pin_groups)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|c| c == "position");
+        if !has_pos {
+            conn.execute(
+                "ALTER TABLE pin_groups ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -261,7 +275,7 @@ impl MarkStore {
     pub fn list_pins(&self, file_id: &str) -> rusqlite::Result<PinList> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name FROM pin_groups WHERE file_id = ?1 ORDER BY id",
+            "SELECT id, name FROM pin_groups WHERE file_id = ?1 ORDER BY position, id",
         )?;
         let groups = stmt
             .query_map(params![file_id], |r| {
@@ -278,11 +292,12 @@ impl MarkStore {
         Ok(PinList { groups, pins })
     }
 
-    /// 新建分组(同名已存在则返回现有)。
+    /// 新建分组(同名已存在则返回现有);新分组追加到尾部(position = MAX+1)。
     pub fn create_pin_group(&self, file_id: &str, name: &str) -> rusqlite::Result<PinGroup> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT OR IGNORE INTO pin_groups (file_id, name) VALUES (?1, ?2)",
+            "INSERT OR IGNORE INTO pin_groups (file_id, name, position)
+             SELECT ?1, ?2, COALESCE(MAX(position), -1) + 1 FROM pin_groups WHERE file_id = ?1",
             params![file_id, name],
         )?;
         conn.query_row(
@@ -313,6 +328,18 @@ impl MarkStore {
             conn.execute(
                 "UPDATE pins SET position = ?1 WHERE id = ?2 AND file_id = ?3 AND group_id = ?4",
                 params![i as i64, id, file_id, group_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 分组全量重排(拖拽分组顺序后调用):`ids` 的顺序即新 position(0..n)。
+    pub fn reorder_pin_groups(&self, file_id: &str, ids: &[i64]) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE pin_groups SET position = ?1 WHERE id = ?2 AND file_id = ?3",
+                params![i as i64, id, file_id],
             )?;
         }
         Ok(())

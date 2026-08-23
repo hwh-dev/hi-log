@@ -488,6 +488,24 @@ fn reorder_pins(
     Ok(())
 }
 
+/// 分组全量重排(拖拽分组顺序后调用)
+#[tauri::command]
+fn reorder_pin_groups(
+    app: AppHandle,
+    state: State<MarkState>,
+    file_id: String,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    state
+        .store
+        .lock()
+        .unwrap()
+        .reorder_pin_groups(&file_id, &ids)
+        .map_err(|e| e.to_string())?;
+    emit_pins_changed(&app);
+    Ok(())
+}
+
 /// 跨组移动:移到目标组末尾
 #[tauri::command]
 fn move_pin_to_group(
@@ -542,7 +560,10 @@ fn create_popout_window(
     )
     .title(title)
     .inner_size(width, height)
-    .min_inner_size(320.0, 240.0);
+    .min_inner_size(320.0, 240.0)
+    // 无原生边框:与主窗口一致,用自定义标题栏(popout-header)。
+    // 否则弹窗同时有原生标题栏(最小/最大/关闭)和自定义 ×,出现两个关闭按钮。
+    .decorations(false);
     // 仅 Windows 预创建必须隐藏,open_panel 时再 show;
     // shadow 重绑定使 Windows 独有字段不引入 unused_mut 警告(非 Windows 分支从不重赋值)
     #[cfg(target_os = "windows")]
@@ -726,6 +747,7 @@ fn main() {
             create_pin_group,
             delete_pin_group,
             reorder_pins,
+            reorder_pin_groups,
             move_pin_to_group,
             open_panel
         ])

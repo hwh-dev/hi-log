@@ -19,9 +19,9 @@ export default function SnapshotsPanel({
   return (
     <section className="snapshots-panel">
       <div className="snapshots-header">
-        <span>SNAPSHOTS</span>
+        <span>快照</span>
         <button className="snapshot-add" onClick={onAdd} title="固定当前视图为快照">
-          📌
+          ＋ 快照
         </button>
       </div>
       {snapshots.length === 0 ? (
@@ -35,7 +35,6 @@ export default function SnapshotsPanel({
             onClick={() => onJump(s.line_no - 1)}
             onDoubleClick={() => onRename(s.id)}
           >
-            <span className="snapshot-pin">📌</span>
             <span className="snapshot-name">{s.name}</span>
             <span className="snapshot-line">L{s.line_no.toLocaleString()}</span>
             <button

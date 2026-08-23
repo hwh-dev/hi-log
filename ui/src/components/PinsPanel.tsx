@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export interface Pin {
   id: number;
@@ -32,6 +32,8 @@ interface Props {
   onReorder: (groupId: number, orderedIds: number[]) => void;
   /** 跨组移动(拖到分组标题) */
   onMoveToGroup: (pinId: number, groupId: number) => void;
+  /** 分组全量重排(拖拽分组顺序) */
+  onReorderGroups: (orderedGroupIds: number[]) => void;
 }
 
 /**
@@ -49,9 +51,15 @@ export default function PinsPanel({
   onDeleteGroup,
   onReorder,
   onMoveToGroup,
+  onReorderGroups,
 }: Props) {
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const dragIdRef = useRef<number | null>(null);
+  // 折叠的分组 id 集合(空 = 全展开);分组标题箭头点击切换
+  const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
+  // 分组排序拖拽(指针事件):dragGroupId 仅作视觉,dragStateRef 记录拖拽状态
+  const [dragGroupId, setDragGroupId] = useState<number | null>(null);
+  const dragStateRef = useRef<{ groupId: number; startX: number; startY: number; moved: boolean } | null>(null);
 
   const pinsIn = (groupId: number) =>
     pins.filter((p) => p.group_id === groupId);
@@ -67,12 +75,84 @@ export default function PinsPanel({
     onReorder(groupId, ids);
   };
 
+  /** 分组重排(拖拽排序):把 dragId 移到 targetId 前(或后) */
+  const reorderGroups = (dragId: number, targetId: number, before: boolean) => {
+    const ids = groups.map((g) => g.id);
+    const from = ids.indexOf(dragId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0 || from === to) return;
+    ids.splice(from, 1);
+    ids.splice(ids.indexOf(targetId) + (before ? 0 : 1), 0, dragId);
+    onReorderGroups(ids);
+  };
+
+  const toggleCollapse = (groupId: number) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  };
+
+  /** 在 ⠿ 手柄上按下:开始分组拖拽(指针事件,绕开标题内可点击按钮,可靠) */
+  const startGroupDrag = (groupId: number, e: React.PointerEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return; // 箭头/删除不触发拖拽
+    e.preventDefault();
+    dragStateRef.current = { groupId, startX: e.clientX, startY: e.clientY, moved: false };
+  };
+
+  // 全局 pointermove/up:手动拖拽分组排序(事件挂 window,拖出标题仍能跟踪落点)
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const st = dragStateRef.current;
+      if (!st) return;
+      if (!st.moved) {
+        if (Math.abs(e.clientX - st.startX) < 6 && Math.abs(e.clientY - st.startY) < 6) return;
+        st.moved = true;
+        setDragGroupId(st.groupId);
+      }
+      // 元素命中的分组标题悬停高亮(标了 data-group-id)
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const title = el?.closest(".pin-group-title") as HTMLElement | null;
+      const gid = title ? Number(title.dataset.groupId) : null;
+      for (const t of Array.from(document.querySelectorAll<HTMLElement>(".pin-group-title"))) {
+        t.classList.toggle("drop-target", gid != null && Number(t.dataset.groupId) === gid);
+      }
+    };
+    const onUp = (e: PointerEvent) => {
+      const st = dragStateRef.current;
+      if (st) {
+        if (st.moved) {
+          const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+          const title = el?.closest(".pin-group-title") as HTMLElement | null;
+          const gid = title ? Number(title.dataset.groupId) : null;
+          if (title && gid != null && gid !== st.groupId) {
+            const rect = title.getBoundingClientRect();
+            reorderGroups(st.groupId, gid, e.clientY < rect.top + rect.height / 2);
+          }
+        }
+        dragStateRef.current = null;
+        setDragGroupId(null);
+      }
+      for (const t of Array.from(document.querySelectorAll<HTMLElement>(".pin-group-title"))) {
+        t.classList.remove("drop-target");
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [reorderGroups]);
+
   return (
     <aside className="pins-panel">
       <div className="pins-header">
-        <span className="pins-title">PINS</span>
+        <span className="pins-title">固定</span>
         <button className="pins-new" onClick={() => onNewGroup()} title="新建分组">
-          + 分组
+          ＋ 分组
         </button>
       </div>
       {groups.length === 0 ? (
@@ -87,21 +167,51 @@ export default function PinsPanel({
             const list = pinsIn(g.id);
             return (
               <div key={g.id} className="pin-group">
-                {/* 分组标题:跨组拖拽的放置目标 */}
+                {/* 分组标题:可折叠 + 组内跨组拖拽目标 + 分组拖拽排序(⠿ 手柄) */}
                 <div
-                  className="pin-group-title"
+                  className={`pin-group-title${dragGroupId === g.id ? " dragging" : ""}`}
+                  data-group-id={g.id}
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={(e) => {
                     e.preventDefault();
-                    const id = dragIdRef.current;
-                    if (id != null) onMoveToGroup(id, g.id);
+                    // 组内 pin 拖到标题 → 移入该组;分组排序走指针拖拽(不经此处)
+                    if (dragIdRef.current != null) onMoveToGroup(dragIdRef.current, g.id);
                   }}
                 >
-                  <span className="pin-group-name">📌 {g.name}</span>
+                  <span
+                    className="pin-group-drag"
+                    title="拖拽排序分组"
+                    onPointerDown={(e) => startGroupDrag(g.id, e)}
+                  >
+                    ⠿
+                  </span>
+                  <button
+                    className="pin-group-arrow"
+                    title={collapsed.has(g.id) ? "展开" : "折叠"}
+                    draggable={false}
+                    onDragStart={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleCollapse(g.id);
+                    }}
+                  >
+                    {collapsed.has(g.id) ? "▶" : "▼"}
+                  </button>
+                  <span className="pin-group-name" onClick={() => toggleCollapse(g.id)}>
+                    {g.name}
+                  </span>
                   <span className="pin-group-count">{list.length}</span>
                   <button
                     className="pin-group-del"
                     title="删除分组(组内固定移到默认组)"
+                    draggable={false}
+                    onDragStart={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
                     onClick={(e) => {
                       e.stopPropagation();
                       onDeleteGroup(g.id);
@@ -110,7 +220,8 @@ export default function PinsPanel({
                     ×
                   </button>
                 </div>
-                {list.map((p) => (
+                {!collapsed.has(g.id) &&
+                  list.map((p) => (
                   <div
                     key={p.id}
                     className={`pin-item${draggingId === p.id ? " dragging" : ""}`}
@@ -139,6 +250,9 @@ export default function PinsPanel({
                     <span className={`pin-item-no${p.name ? " named" : ""}`}>
                       {p.name ? p.name : `L${p.line_no.toLocaleString()}`}
                     </span>
+                    {p.name && (
+                      <span className="pin-item-meta">L{p.line_no.toLocaleString()}</span>
+                    )}
                     <button
                       className="pin-item-rename"
                       aria-label="重命名固定"
@@ -160,9 +274,7 @@ export default function PinsPanel({
                     >
                       ×
                     </button>
-                    <span className="pin-item-text">
-                      {p.name ? `L${p.line_no.toLocaleString()} · ${lineText[p.line_no] ?? ""}` : lineText[p.line_no] ?? ""}
-                    </span>
+                    <span className="pin-item-text">{lineText[p.line_no] ?? ""}</span>
                   </div>
                 ))}
               </div>
