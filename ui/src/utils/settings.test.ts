@@ -56,6 +56,7 @@ describe("loadSettings", () => {
     expect(s.theme).toBe("dark");
     expect(s.themeStyle).toBe("solid");
     expect(s.backgroundImage).toBe("");
+    expect(s.pinsSort).toBe("time");
     expect(s.fontSize).toBe(13);
     expect(s.rowSpacing).toBe(9);
     expect(s.contextLines).toBe(0);
@@ -82,6 +83,8 @@ describe("loadSettings", () => {
     localStorage.setItem("hi-log.background", "../evil.png");
     expect(loadSettings().themeStyle).toBe("solid"); // 非法风格回退
     expect(loadSettings().backgroundImage).toBe(""); // 路径注入拒收
+    localStorage.setItem("hi-log.pins-sort", "shiny");
+    expect(loadSettings().pinsSort).toBe("time"); // 非法排序回退
   });
 
   it("backgroundImage 只接受固定文件名", () => {

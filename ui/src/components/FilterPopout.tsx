@@ -46,7 +46,6 @@ export default function FilterPopout() {
   const [activeId, setActiveId] = useState<number | null>(null);
   const [lineCache, setLineCache] = useState<LineCache>({});
   const [marks, setMarks] = useState<MarkMap>({});
-  const [pinGroups, setPinGroups] = useState<PinGroup[]>([]);
   const [pins, setPins] = useState<Pin[]>([]);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; lineNo: number } | null>(null);
   const [promptCfg, setPromptCfg] = useState<PromptConfig | null>(null);
@@ -79,7 +78,6 @@ export default function FilterPopout() {
   const loadPins = useCallback(async (fid: string) => {
     try {
       const data = await invoke<{ groups: PinGroup[]; pins: Pin[] }>("list_pins", { fileId: fid });
-      setPinGroups(data.groups);
       setPins(data.pins);
     } catch (e) {
       console.error("list_pins failed", e);
@@ -299,66 +297,18 @@ export default function FilterPopout() {
     await invoke("remove_mark", { markId }).catch((e) => console.error("remove_mark failed", e));
   }, []);
 
-  // ── 固定(pin)操作 ──
-  const addPinAction = useCallback((lineNo: number, groupId: number | null) => {
+  // ── 固定(pin)操作:一次点击零输入(默认组+无名称;改名去侧栏 hover)──
+  const pinLineAction = useCallback((lineNo: number) => {
     const fid = fileIdRef.current;
     if (!fid) return;
     setCtxMenu(null);
-    setPromptCfg({
-      title: `固定第 ${lineNo} 行`,
-      hint: "名称可留空",
-      placeholder: "固定名称",
-      okLabel: "固定",
-      onSubmit: (name) => {
-        void invoke("add_pin", { fileId: fid, lineNo, groupId, name }).catch((e) =>
-          console.error("add_pin failed", e),
-        );
-      },
-    });
+    void invoke("add_pin", { fileId: fid, lineNo, groupId: null, name: "" }).catch((e) =>
+      console.error("add_pin failed", e),
+    );
   }, []);
 
   const unpinAction = useCallback(async (pinId: number) => {
     await invoke("remove_pin", { pinId }).catch((e) => console.error("remove_pin failed", e));
-  }, []);
-
-  const renamePinAction = useCallback((pinId: number) => {
-    const current = pins.find((p) => p.id === pinId)?.name ?? "";
-    setCtxMenu(null);
-    setPromptCfg({
-      title: "重命名固定",
-      initial: current,
-      placeholder: "固定名称(可留空)",
-      okLabel: "保存",
-      onSubmit: (name) => {
-        void invoke("rename_pin", { pinId, name }).catch((e) =>
-          console.error("rename_pin failed", e),
-        );
-      },
-    });
-  }, [pins]);
-
-  const newPinGroupAction = useCallback((): Promise<number | null> => {
-    // 弹窗异步收集名称;取消时 Promise 不 resolve,"新建并固定"链自然中断
-    return new Promise((resolve) => {
-      const fid = fileIdRef.current;
-      if (!fid) return resolve(null);
-      setCtxMenu(null);
-      setPromptCfg({
-        title: "新建分组",
-        placeholder: "分组名称",
-        okLabel: "创建",
-        onSubmit: (name) => {
-          const trimmed = name.trim();
-          if (!trimmed) return resolve(null);
-          invoke<PinGroup>("create_pin_group", { fileId: fid, name: trimmed })
-            .then((g) => resolve(g.id))
-            .catch((e) => {
-              console.error("create_pin_group failed", e);
-              resolve(null);
-            });
-        },
-      });
-    });
   }, []);
 
   return (
@@ -409,20 +359,12 @@ export default function FilterPopout() {
               const m = marks[ctxMenu.lineNo];
               if (m) void removeMarkAction(m.id);
             }}
-            pinGroups={pinGroups}
-            pinnedGroup={pinned ? pinGroups.find((g) => g.id === pinned.group_id) ?? null : null}
-            onPin={(gid) => void addPinAction(ctxMenu.lineNo, gid)}
-            onUnpin={() => {
-              if (pinned) void unpinAction(pinned.id);
-            }}
-            onRenamePin={() => {
-              if (pinned) void renamePinAction(pinned.id);
-            }}
-            onNewGroupAndPin={() => {
-              void newPinGroupAction().then((gid) => {
-                if (gid != null) void addPinAction(ctxMenu.lineNo, gid);
-              });
-            }}
+            pinned={!!pinned}
+            onTogglePin={
+              pinned
+                ? () => void unpinAction(pinned.id)
+                : () => pinLineAction(ctxMenu.lineNo)
+            }
             onClose={() => setCtxMenu(null)}
           />
         );

@@ -592,25 +592,13 @@ export default function App() {
     [mutateFile],
   );
 
-  const addPinAction = useCallback(
-    (fileId: string, lineNo: number, groupId: number | null) => {
-      // 弹窗打开前先关掉右键菜单,避免其全屏遮罩残留
-      setCtxMenu(null);
-      // 固定时允许命名(可留空);取消则放弃固定
-      setPromptCfg({
-        title: `固定第 ${lineNo} 行`,
-        hint: "名称可留空",
-        placeholder: "固定名称",
-        okLabel: "固定",
-        onSubmit: (name) => {
-          void invoke("add_pin", { fileId, lineNo, groupId, name }).catch((e) =>
-            console.error("add_pin failed", e),
-          );
-        },
-      });
-    },
-    [],
-  );
+  /** 固定/取消固定:一次点击零输入(默认组+无名称;改名去侧栏 hover) */
+  const pinLineAction = useCallback((fileId: string, lineNo: number) => {
+    setCtxMenu(null);
+    void invoke("add_pin", { fileId, lineNo, groupId: null, name: "" }).catch((e) =>
+      console.error("add_pin failed", e),
+    );
+  }, []);
 
   const unpinAction = useCallback(async (pinId: number) => {
     await invoke("remove_pin", { pinId }).catch((e) => console.error("remove_pin failed", e));
@@ -649,67 +637,15 @@ export default function App() {
     });
   }, []);
 
-  const newPinGroupAction = useCallback((fileId: string): Promise<number | null> => {
-    // 弹窗异步收集名称;取消时 Promise 不 resolve,"新建并固定"链自然中断
-    return new Promise((resolve) => {
-      setCtxMenu(null);
-      setPromptCfg({
-        title: "新建分组",
-        placeholder: "分组名称",
-        okLabel: "创建",
-        onSubmit: (name) => {
-          const trimmed = name.trim();
-          if (!trimmed) return resolve(null);
-          invoke<PinGroup>("create_pin_group", { fileId, name: trimmed })
-            .then((g) => resolve(g.id))
-            .catch((e) => {
-              console.error("create_pin_group failed", e);
-              resolve(null);
-            });
-        },
-      });
-    });
+  /** 手动拖拽重排:ids 为新顺序。UI 已撤销分组,固定全部在默认组,取首个 pin 的组 id */
+  const reorderPinsAction = useCallback((fileId: string, ids: number[]) => {
+    const f = filesRef.current[fileId];
+    const gid = f?.pins.find((p) => p.group_id != null)?.group_id ?? null;
+    if (gid == null) return;
+    void invoke("reorder_pins", { fileId, groupId: gid, ids }).catch((e) =>
+      console.error("reorder_pins failed", e),
+    );
   }, []);
-
-  const deletePinGroupAction = useCallback(
-    async (fileId: string, groupId: number) => {
-      if (!filesRef.current[fileId]) return;
-      await invoke("delete_pin_group", { fileId, groupId }).catch((e) =>
-        console.error("delete_pin_group failed", e),
-      );
-    },
-    [],
-  );
-
-  const reorderPinsAction = useCallback(
-    async (groupId: number, ids: number[]) => {
-      if (!fileMeta) return;
-      await invoke("reorder_pins", { fileId: fileMeta.id, groupId, ids }).catch((e) =>
-        console.error("reorder_pins failed", e),
-      );
-    },
-    [fileMeta],
-  );
-
-  const reorderGroupsAction = useCallback(
-    async (ids: number[]) => {
-      if (!fileMeta) return;
-      await invoke("reorder_pin_groups", { fileId: fileMeta.id, ids }).catch((e) =>
-        console.error("reorder_pin_groups failed", e),
-      );
-    },
-    [fileMeta],
-  );
-
-  const movePinAction = useCallback(
-    async (pinId: number, groupId: number) => {
-      if (!fileMeta) return;
-      await invoke("move_pin_to_group", { pinId, fileId: fileMeta.id, groupId }).catch((e) =>
-        console.error("move_pin_to_group failed", e),
-      );
-    },
-    [fileMeta],
-  );
 
   /** 打开文件(统一入口:透传编码设置;openFile 与 tail 重开共用,避免两处漂移) */
   const openWithEncoding = useCallback(async (path: string): Promise<FileMeta> => {
@@ -1734,7 +1670,7 @@ export default function App() {
                         onToggleView={togglePinsView}
                         onUnpin={(_fid, pinId) => void unpinAction(pinId)}
                         onRenamePin={(_fid, pinId) => renamePinAction(pinId)}
-                        onDeleteGroup={deletePinGroupAction}
+                        onReorder={reorderPinsAction}
                       />
                     )}
                     {sidebarSections.notes && (
@@ -1894,7 +1830,6 @@ export default function App() {
         // 菜单数据按"右键所在文件"取(主 tab 或分屏右栏)
         const ctxFile = files[ctxMenu.fileId] ?? null;
         const ctxMarks = ctxFile?.marks ?? {};
-        const ctxPinGroups = ctxFile?.pinGroups ?? [];
         const ctxPins = ctxFile?.pins ?? [];
         const ctxMark = ctxMarks[ctxMenu.lineNo] ?? null;
         const pinned = ctxPins.find((p) => p.line_no === ctxMenu.lineNo) ?? null;
@@ -1934,20 +1869,12 @@ export default function App() {
             onClear={() => {
               if (ctxMark) void removeMarkAction(ctxMark.id);
             }}
-            pinGroups={ctxPinGroups}
-            pinnedGroup={pinned ? ctxPinGroups.find((g) => g.id === pinned.group_id) ?? null : null}
-            onPin={(gid) => void addPinAction(ctxMenu.fileId, ctxMenu.lineNo, gid)}
-            onUnpin={() => {
-              if (pinned) void unpinAction(pinned.id);
-            }}
-            onRenamePin={() => {
-              if (pinned) void renamePinAction(pinned.id);
-            }}
-            onNewGroupAndPin={() => {
-              void newPinGroupAction(ctxMenu.fileId).then((gid) => {
-                if (gid != null) void addPinAction(ctxMenu.fileId, ctxMenu.lineNo, gid);
-              });
-            }}
+            pinned={!!pinned}
+            onTogglePin={
+              pinned
+                ? () => void unpinAction(pinned.id)
+                : () => pinLineAction(ctxMenu.fileId, ctxMenu.lineNo)
+            }
             onClose={() => setCtxMenu(null)}
           />
         );

@@ -1,5 +1,4 @@
 import { PALETTE_NAMES, paletteColor, type Mark } from "../utils/palette";
-import type { PinGroup } from "./PinsPanel";
 
 interface Props {
   x: number;
@@ -11,17 +10,10 @@ interface Props {
   onMark: (color: number) => void;
   onNote: () => void;
   onClear: () => void;
-  /** 固定分组列表(含默认组) */
-  pinGroups: PinGroup[];
-  /** 该行已固定的分组(未固定则 null) */
-  pinnedGroup: PinGroup | null;
-  /** 固定到分组(名称由调用方 prompt,可为空) */
-  onPin: (groupId: number) => void;
-  onUnpin: () => void;
-  /** 重命名该行固定 */
-  onRenamePin: () => void;
-  /** 新建分组并固定到新组 */
-  onNewGroupAndPin: () => void;
+  /** 该行是否已固定(决定"固定/取消固定"文案) */
+  pinned?: boolean;
+  /** 固定/取消固定:一次点击零输入(默认组+无名称;改名去侧栏 hover) */
+  onTogglePin?: () => void;
   /** 多行选中时批量标记(蓝色整行);缺省不显示 */
   onMarkRange?: () => void;
   /** 有选中文本时"复制选中文本";缺省不显示 */
@@ -38,19 +30,15 @@ export default function ContextMenu({
   onMark,
   onNote,
   onClear,
-  pinGroups,
-  pinnedGroup,
-  onPin,
-  onUnpin,
-  onRenamePin,
-  onNewGroupAndPin,
+  pinned,
+  onTogglePin,
   onClose,
   onMarkRange,
   onCopy,
 }: Props) {
   const menuW = 224;
   const menuH =
-    36 + 36 + (mark ? 26 : 0) + (onMarkRange ? 28 : 0) + (onCopy ? 28 : 0) + 34 + Math.min(pinGroups.length, 5) * 24 + 26 + (pinnedGroup ? 52 : 0) + 8;
+    36 + 36 + (mark ? 26 : 0) + (onMarkRange ? 28 : 0) + (onCopy ? 28 : 0) + 34 + 28 + 8;
   const style: React.CSSProperties = {
     left: Math.max(4, Math.min(x, window.innerWidth - menuW)),
     top: Math.max(4, Math.min(y, window.innerHeight - menuH)),
@@ -100,30 +88,12 @@ export default function ContextMenu({
           </button>
         )}
 
-        {/* ── 固定(独立于颜色标记的书签功能)── */}
+        {/* ── 固定/取消固定:一次点击零输入(改名去侧栏 hover)── */}
         <div className="ctx-pins-label">📌 固定</div>
-        {pinGroups.map((g) => (
-          <button
-            key={g.id}
-            className={`ctx-item${pinnedGroup?.id === g.id ? " pinned" : ""}`}
-            onClick={() => onPin(g.id)}
-          >
-            {g.name}
-            {pinnedGroup?.id === g.id ? " ✓" : ""}
+        {onTogglePin && (
+          <button className={`ctx-item${pinned ? " pinned" : ""}`} onClick={onTogglePin}>
+            {pinned ? "取消固定" : "固定"}
           </button>
-        ))}
-        <button className="ctx-item" onClick={onNewGroupAndPin}>
-          新建分组并固定…
-        </button>
-        {pinnedGroup && (
-          <>
-            <button className="ctx-item" onClick={onRenamePin}>
-              重命名固定…
-            </button>
-            <button className="ctx-item danger" onClick={onUnpin}>
-              取消固定
-            </button>
-          </>
         )}
       </div>
     </div>

@@ -21,6 +21,8 @@ export type ThemeSetting = "dark" | "light" | "system";
 export type EncodingSetting = "auto" | "utf8" | "gbk" | "utf16";
 /** 外观风格:实心(默认)或液态玻璃(半透明+背景模糊) */
 export type ThemeStyleSetting = "solid" | "glass";
+/** 固定面板排序规则:标记时间 / 文件中顺序(行号) / 手动(拖拽重排) */
+export type PinsSortSetting = "time" | "line" | "custom";
 
 export interface AppSettings {
   // 外观
@@ -61,6 +63,8 @@ export interface AppSettings {
     pinsByFile: boolean;
     notesByFile: boolean;
   };
+  /** 固定面板排序:标记时间(默认) / 文件中顺序 / 手动拖拽 */
+  pinsSort: PinsSortSetting;
 }
 
 export const DEFAULT_FONT_FAMILY =
@@ -87,6 +91,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   filterHeight: 220,
   sidebarWidth: 230,
   sidebarSections: { pins: true, notes: true, pinsByFile: true, notesByFile: true },
+  pinsSort: "time",
 };
 
 // ── schema:每个设置项的存储 key / 解析(钳制与白名单)──
@@ -228,6 +233,11 @@ const SCHEMA: { [K in keyof AppSettings]: SettingDef<AppSettings[K]> } = {
       }
     },
     dump: (v) => JSON.stringify(v),
+  },
+  pinsSort: {
+    key: "hi-log.pins-sort",
+    def: "time",
+    parse: (r) => (r === "line" || r === "custom" ? r : "time"),
   },
   sidebarWidth: {
     key: "hi-log.sidebar-width",

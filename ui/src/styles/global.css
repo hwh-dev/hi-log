@@ -885,6 +885,11 @@ button {
   background: var(--bg-hover);
 }
 
+/* 手动拖拽重排:被拖项半透明 */
+.pin-item.dragging {
+  opacity: 0.45;
+}
+
 /* 拖拽中的行:半透明提示可放置 */
 .pin-item.dragging {
   opacity: 0.45;

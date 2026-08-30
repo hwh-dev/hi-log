@@ -7,6 +7,9 @@ export interface Pin {
   group_id: number | null;
   /** 自定义名称(可空;显示优先于行号) */
   name: string;
+  /** 组内排序序号(拖拽重排写入) */
+  position: number;
+  /** unix 秒 */
   created_at: number;
 }
 
