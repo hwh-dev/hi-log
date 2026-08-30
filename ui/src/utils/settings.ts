@@ -1,5 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { appDataDir, join } from "@tauri-apps/api/path";
 import { useSyncExternalStore } from "react";
 
 /**
@@ -17,10 +19,16 @@ import { useSyncExternalStore } from "react";
 
 export type ThemeSetting = "dark" | "light" | "system";
 export type EncodingSetting = "auto" | "utf8" | "gbk" | "utf16";
+/** 外观风格:实心(默认)或液态玻璃(半透明+背景模糊) */
+export type ThemeStyleSetting = "solid" | "glass";
 
 export interface AppSettings {
   // 外观
   theme: ThemeSetting;
+  /** 外观风格:玻璃(半透明+backdrop-filter;引擎不支持时 CSS 侧自动回退高不透明) */
+  themeStyle: ThemeStyleSetting;
+  /** 背景图固定文件名 background.<ext>(只存文件名不存路径;""=内置渐变底) */
+  backgroundImage: string;
   fontFamily: string;
   /** 字号 px(11-16),与行距共同决定行高 */
   fontSize: number;
@@ -60,6 +68,8 @@ export const DEFAULT_FONT_FAMILY =
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: "dark",
+  themeStyle: "solid",
+  backgroundImage: "",
   fontFamily: DEFAULT_FONT_FAMILY,
   fontSize: 13,
   rowSpacing: 9,
@@ -103,6 +113,20 @@ const SCHEMA: { [K in keyof AppSettings]: SettingDef<AppSettings[K]> } = {
     key: "hi-log.theme",
     def: "dark",
     parse: (r) => (r === "light" || r === "system" ? r : "dark"),
+  },
+  themeStyle: {
+    key: "hi-log.theme-style",
+    def: "solid",
+    parse: (r) => (r === "glass" ? "glass" : "solid"),
+  },
+  backgroundImage: {
+    key: "hi-log.background",
+    def: "",
+    // 固定文件名白名单(只存 background.<ext>,路径/URL 一律拒收)
+    parse: (r) => {
+      const t = (r ?? "").trim().toLowerCase();
+      return /^background\.(png|jpe?g|webp|bmp)$/.test(t) ? t : "";
+    },
   },
   fontFamily: {
     key: "hi-log.font-family",
@@ -321,12 +345,88 @@ export function rowHeight(s: AppSettings): number {
   return s.fontSize + s.rowSpacing;
 }
 
+// ── 玻璃主题:背景图解析(固定文件名 → asset URL)+ blur 能力检测 ──
+
+/** backdrop-filter 支持(老 WebKitGTK 无;不支持时 CSS 侧用高不透明回退主题) */
+const BLUR_SUPPORTED = (() => {
+  try {
+    return (
+      typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("backdrop-filter", "blur(1px)")
+    );
+  } catch {
+    return false;
+  }
+})();
+
+/** 已解析的背景图 asset URL(未解析/失效 = null → CSS 渐变兜底) */
+let bgAssetUrl: string | null = null;
+/** 解析代际:快速换图/重启解析时旧结果作废,防乱序回写 */
+let bgResolveSeq = 0;
+
+function applyBgImage() {
+  const root = document.documentElement;
+  if (cache.backgroundImage && bgAssetUrl) {
+    root.style.setProperty("--bg-image", `url("${bgAssetUrl}")`);
+  } else {
+    root.style.removeProperty("--bg-image");
+  }
+}
+
+/** 由固定文件名重拼 asset URL 并预载探测(换机/文件丢失 → null → 渐变兜底) */
+export async function resolveBackgroundImageUrl(): Promise<string | null> {
+  const seq = ++bgResolveSeq;
+  const name = cache.backgroundImage;
+  if (!name) {
+    bgAssetUrl = null;
+    applyBgImage();
+    return null;
+  }
+  try {
+    const url = convertFileSrc(await join(await appDataDir(), name));
+    const ok = await new Promise<boolean>((res) => {
+      const img = new Image();
+      img.onload = () => res(true);
+      img.onerror = () => res(false);
+      img.src = url;
+    });
+    if (seq !== bgResolveSeq) return null; // 已被新选择取代
+    bgAssetUrl = ok ? url : null;
+    applyBgImage();
+    return bgAssetUrl;
+  } catch {
+    if (seq === bgResolveSeq) {
+      bgAssetUrl = null;
+      applyBgImage();
+    }
+    return null;
+  }
+}
+
+/**
+ * 选图成功后直接注入 URL(免一次 appDataDir 重解析)。
+ * 必须先于 setSetting() 调用:否则"新文件名 + 旧 URL"会错配一帧。
+ */
+export function setResolvedBackgroundPath(absPath: string | null) {
+  bgResolveSeq++;
+  bgAssetUrl = absPath ? convertFileSrc(absPath) : null;
+  applyBgImage();
+}
+
+/** 当前生效的背景 URL(设置页预览用);未解析/失效 = null */
+export function getResolvedBackgroundUrl(): string | null {
+  return bgAssetUrl;
+}
+
 export function applyAppearance(s: AppSettings) {
   const root = document.documentElement;
   root.dataset.theme = resolveTheme(s.theme, darkMQ?.matches ?? false);
+  root.dataset.themeStyle = s.themeStyle;
+  if (BLUR_SUPPORTED) delete root.dataset.blurFallback;
+  else root.dataset.blurFallback = "1";
   root.style.setProperty("--font-size", `${s.fontSize}px`);
   root.style.setProperty("--row-height", `${rowHeight(s)}px`);
   root.style.setProperty("--font-family", s.fontFamily);
+  applyBgImage();
 }
 
 let bridgeStarted = false;
@@ -339,12 +439,15 @@ let bridgeStarted = false;
  */
 export function initSettingsBridge(): void {
   applyAppearance(cache);
+  // 背景图 URL 异步解析(Image 预载探测):启动及各窗口收到变更后各重解一次
+  void resolveBackgroundImageUrl();
   if (bridgeStarted) return;
   bridgeStarted = true;
   void listen("settings_changed", () => {
     cache = loadSettings();
     applyAppearance(cache);
     notify();
+    void resolveBackgroundImageUrl();
   });
   darkMQ?.addEventListener?.("change", () => {
     if (cache.theme === "system") {

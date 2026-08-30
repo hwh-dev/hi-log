@@ -4,6 +4,8 @@
 mod ipc;
 mod mcp;
 
+use std::io::Write;
+
 use hi_log_core::document::Document as CoreDocument;
 use hi_log_core::encoding::Encoding as CoreEncoding;
 use hi_log_core::marks::{
@@ -18,8 +20,9 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 struct AppState {
-    /// 文档以 Arc 共享:后台搜索线程与 UI 线程可并发只读访问
-    documents: Mutex<HashMap<String, Arc<CoreDocument>>>,
+    /// 文档以 Arc 共享:后台搜索线程与 UI 线程可并发只读访问。
+    /// 外层也 Arc:open_file 后台线程可 clone 持有,不必跨 await 持锁。
+    documents: Arc<Mutex<HashMap<String, Arc<CoreDocument>>>>,
 }
 
 struct SearchState {
@@ -41,9 +44,12 @@ struct LineData {
     line_no: usize, // 1-based for display
 }
 
+/// 打开文件:mmap + 行索引在**后台线程**执行(tauri async command,
+/// spawn_blocking 跑阻塞扫描),不冻结 UI 线程 —— 大文件拖拽不再卡界面。
 #[tauri::command]
-fn open_file(
-    state: State<AppState>,
+async fn open_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
     path: String,
     force_encoding: Option<String>,
 ) -> Result<FileMeta, String> {
@@ -55,18 +61,23 @@ fn open_file(
         Some("utf16") => Some(CoreEncoding::Utf16Le),
         Some(other) => return Err(format!("unknown encoding: {other}")),
     };
-    let doc = CoreDocument::open_with_encoding(&path, enc).map_err(|e| format!("open: {e}"))?;
+    let docs = state.documents.clone();
+    let p = path.clone();
+    // 阻塞的 mmap + 建索引放后台线程,await 期间 UI 线程可继续响应
+    let doc = tauri::async_runtime::spawn_blocking(move || {
+        CoreDocument::open_with_encoding(&p, enc).map_err(|e| format!("open: {e}"))
+    })
+    .await
+    .map_err(|e| format!("open task join: {e}"))??;
     let meta = FileMeta {
         id: path.clone(),
         size: doc.size(),
         lines: doc.line_count(),
         encoding: doc.encoding().name().to_string(),
     };
-    state
-        .documents
-        .lock()
-        .unwrap()
-        .insert(path, Arc::new(doc));
+    docs.lock().unwrap().insert(path, Arc::new(doc));
+    // 通知前端"文件已就绪"(前端可据此刷新状态栏/进度)
+    let _ = app.emit("file_opened", &meta);
     Ok(meta)
 }
 
@@ -75,6 +86,75 @@ fn open_file(
 fn close_file(state: State<AppState>, file_id: String) -> Result<(), String> {
     state.documents.lock().unwrap().remove(&file_id);
     Ok(())
+}
+
+/// 前端 JS 错误(未捕获异常/未处理 Promise 拒绝)写入崩溃日志,
+/// 与 Rust panic 同文件,便于完整反馈定位。
+#[tauri::command]
+fn log_js_error(message: String, stack: Option<String>) -> Result<(), String> {
+    let dir = mcp::app_data_dir();
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("hi-log-crash.log"))
+    {
+        let _ = writeln!(f, "=== renderer error @ {} ===", now_unix());
+        let _ = writeln!(f, "{message}");
+        if let Some(s) = stack {
+            let _ = writeln!(f, "{s}");
+        }
+        let _ = writeln!(f);
+    }
+    Ok(())
+}
+
+/// 分级运行日志:前端 debug 埋点(换行换算/跳转/渲染摘要)写 hi-log.log,
+/// 用户复现后 `hi-log export log` 导出定位。level: debug/info/error(默认 info)。
+#[tauri::command]
+fn log_message(message: String, level: Option<String>) -> Result<(), String> {
+    let dir = mcp::app_data_dir();
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("hi-log.log"))
+    {
+        let lv = level.unwrap_or_else(|| "info".into());
+        let _ = writeln!(f, "[{} {}] {message}", now_unix(), lv);
+    }
+    Ok(())
+}
+
+/// 背景图:校验扩展名 → 拷贝到 app_data_dir/background.<ext> → 返回绝对路径。
+/// 前端只存固定文件名(settings 的 hi-log.background),重选后覆盖同名文件。
+#[tauri::command]
+fn set_background_image(src_path: String) -> Result<String, String> {
+    let ext = valid_bg_ext(&src_path).ok_or("unsupported image type")?;
+    let dir = mcp::app_data_dir();
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let dest = dir.join(format!("background.{ext}"));
+    std::fs::copy(&src_path, &dest).map_err(|e| format!("copy: {e}"))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// 背景图扩展名白名单(大小写不敏感);其余一律拒绝,防路径注入
+fn valid_bg_ext(path: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("png"),
+        "jpg" => Some("jpg"),
+        "jpeg" => Some("jpeg"),
+        "webp" => Some("webp"),
+        "bmp" => Some("bmp"),
+        _ => None,
+    }
 }
 
 /// tail 模式的轻量轮询:只 stat 文件大小,不变就不重建索引
@@ -123,6 +203,8 @@ struct SearchOpts {
 struct HitPayload {
     line_no: usize, // 1-based
     ranges: Vec<(usize, usize)>,
+    /// 命中行文本:随事件下发,前端直接缓存,滚动命中面板零 IPC
+    content: String,
 }
 
 /// 携带 search_id:前端据此丢弃过期搜索的残留事件,
@@ -192,6 +274,7 @@ fn start_search(
                 batch.push(HitPayload {
                     line_no: hit.line_no + 1,
                     ranges: hit.ranges.iter().map(|r| (r.start, r.end)).collect(),
+                    content: doc.line_string(hit.line_no).unwrap_or_default(),
                 });
                 if batch.len() >= 2000 {
                     let _ = app.emit(
@@ -261,6 +344,8 @@ struct MarkPayload {
     line_no: usize, // 1-based
     color: u8,
     note: String,
+    col: Option<usize>,
+    len: Option<usize>,
     created_at: i64,
 }
 
@@ -272,6 +357,8 @@ impl From<CoreMark> for MarkPayload {
             line_no: m.line_no,
             color: m.color,
             note: m.note,
+            col: m.col,
+            len: m.len,
             created_at: m.created_at,
         }
     }
@@ -290,12 +377,14 @@ fn add_mark(
     line_no: usize,
     color: u8,
     note: Option<String>,
+    col: Option<usize>,   // 部分标记:选中文本起始偏移(可选)
+    len: Option<usize>,   // 部分标记:选中文本长度(可选)
 ) -> Result<MarkPayload, String> {
     let mark = state
         .store
         .lock()
         .unwrap()
-        .add(&file_id, line_no, color, &note.unwrap_or_default())
+        .add_range(&file_id, line_no, color, &note.unwrap_or_default(), col, len)
         .map_err(|e| e.to_string())?;
     emit_marks_changed(&app);
     Ok(mark.into())
@@ -628,6 +717,22 @@ fn open_panel(app: AppHandle, kind: String) -> Result<(), String> {
 /// 不依赖 GUI:AI/脚本可直接消费 JSON。
 fn cli_export(args: &[String]) -> Result<(), String> {
     let what = args.first().map(String::as_str).unwrap_or("");
+    // 导出运行日志(分级埋点 + 崩溃记录,便于反馈):hi-log export log
+    if what == "log" {
+        let dir = mcp::app_data_dir();
+        let run = dir.join("hi-log.log");
+        let crash = dir.join("hi-log-crash.log");
+        println!("run log:  {}", run.display());
+        println!("crash:    {}", crash.display());
+        if run.exists() {
+            println!("{}", std::fs::read_to_string(&run).unwrap_or_default());
+        }
+        if crash.exists() {
+            println!("--- crash ---");
+            println!("{}", std::fs::read_to_string(&crash).unwrap_or_default());
+        }
+        return Ok(());
+    }
     if what != "marks" {
         return Err("usage: hi-log export marks <file> [--format json]".into());
     }
@@ -664,7 +769,36 @@ fn cli_export(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// 崩溃日志:panic hook 写 app_data_dir/hi-log-crash.log(release 无 console,便于反馈)
+fn install_crash_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let dir = mcp::app_data_dir();
+        if let Some(parent) = dir.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("hi-log-crash.log"))
+        {
+            let _ = writeln!(f, "=== panic @ {} ===", now_unix());
+            let _ = writeln!(f, "{info}");
+            let _ = writeln!(f);
+        }
+        // 仍打到 stderr(调试器/终端可见;release 无 console 但保留)
+        eprintln!("[hi-log] panic: {info}");
+    }));
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn main() {
+    install_crash_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         // CLI 子命令:导出(M5)/ MCP Server(M5)
@@ -695,7 +829,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            documents: Mutex::new(HashMap::new()),
+            documents: Arc::new(Mutex::new(HashMap::new())),
         })
         .manage(SearchState {
             next_id: AtomicU32::new(0),
@@ -740,6 +874,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_file,
             close_file,
+            log_js_error,
+            log_message,
             file_size,
             get_lines,
             start_search,
@@ -757,8 +893,32 @@ fn main() {
             reorder_pins,
             reorder_pin_groups,
             move_pin_to_group,
-            open_panel
+            open_panel,
+            set_background_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running hi-log");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_bg_ext;
+
+    #[test]
+    fn bg_ext_whitelist() {
+        assert_eq!(valid_bg_ext("C:\\pics\\wallpaper.png"), Some("png"));
+        assert_eq!(valid_bg_ext("/home/u/pic.JPG"), Some("jpg"));
+        assert_eq!(valid_bg_ext("a.webp"), Some("webp"));
+        assert_eq!(valid_bg_ext("a.jpeg"), Some("jpeg"));
+        assert_eq!(valid_bg_ext("a.bmp"), Some("bmp"));
+    }
+
+    #[test]
+    fn bg_ext_rejects() {
+        assert_eq!(valid_bg_ext("a.gif"), None);
+        assert_eq!(valid_bg_ext("a.xml"), None);
+        assert_eq!(valid_bg_ext("a.png.sh"), None);
+        assert_eq!(valid_bg_ext("noext"), None);
+        assert_eq!(valid_bg_ext(""), None);
+    }
 }

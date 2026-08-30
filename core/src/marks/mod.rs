@@ -31,6 +31,9 @@ pub struct Mark {
     /// PALETTE 下标
     pub color: u8,
     pub note: String,
+    /// 部分标记:选中文本起始偏移(0-based)与长度;None = 整行标记
+    pub col: Option<usize>,
+    pub len: Option<usize>,
     /// unix 秒
     pub created_at: i64,
 }
@@ -85,6 +88,8 @@ impl MarkStore {
                 line_no    INTEGER NOT NULL,
                 color      INTEGER NOT NULL,
                 note       TEXT    NOT NULL DEFAULT '',
+                col        INTEGER,
+                len        INTEGER,
                 created_at INTEGER NOT NULL,
                 UNIQUE(file_id, line_no)
             );
@@ -137,19 +142,61 @@ impl MarkStore {
                 [],
             )?;
         }
+        // 部分标记列(选中文本区间):旧库无 col/len 则补(SQLite 一列一条 ALTER)
+        let has_mark_col: bool = conn
+            .prepare("PRAGMA table_info(marks)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|c| c == "col");
+        if !has_mark_col {
+            conn.execute("ALTER TABLE marks ADD COLUMN col INTEGER", [])?;
+        }
+        let has_mark_len: bool = conn
+            .prepare("PRAGMA table_info(marks)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|c| c == "len");
+        if !has_mark_len {
+            conn.execute("ALTER TABLE marks ADD COLUMN len INTEGER", [])?;
+        }
         Ok(MarkStore { conn: Mutex::new(conn) })
     }
 
     /// 添加标记;若同一文件同一行已存在则覆盖颜色与备注。
     pub fn add(&self, file_id: &str, line_no: usize, color: u8, note: &str) -> rusqlite::Result<Mark> {
+        self.add_range(file_id, line_no, color, note, None, None)
+    }
+
+    /// 标记一行;`col`/`len` 非空表示**部分标记**(选中文本区间,0-based 字节偏移),
+    /// None 表示整行标记。同一行 upsert(后者覆盖前者)。
+    pub fn add_range(
+        &self,
+        file_id: &str,
+        line_no: usize,
+        color: u8,
+        note: &str,
+        col: Option<usize>,
+        len: Option<usize>,
+    ) -> rusqlite::Result<Mark> {
         let now = now_secs();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO marks (file_id, line_no, color, note, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO marks (file_id, line_no, color, note, col, len, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(file_id, line_no) DO UPDATE SET
-               color = excluded.color, note = excluded.note, created_at = excluded.created_at",
-            params![file_id, line_no as i64, color as i64, note, now],
+               color = excluded.color, note = excluded.note,
+               col = excluded.col, len = excluded.len, created_at = excluded.created_at",
+            params![
+                file_id,
+                line_no as i64,
+                color as i64,
+                note,
+                col.map(|c| c as i64),
+                len.map(|l| l as i64),
+                now
+            ],
         )?;
         Self::by_line_locked(&conn, file_id, line_no)
             .map(|m| m.expect("just inserted"))
@@ -178,7 +225,7 @@ impl MarkStore {
     pub fn list(&self, file_id: &str) -> rusqlite::Result<Vec<Mark>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, file_id, line_no, color, note, created_at
+            "SELECT id, file_id, line_no, color, note, col, len, created_at
              FROM marks WHERE file_id = ?1 ORDER BY line_no",
         )?;
         let rows = stmt.query_map(params![file_id], row_to_mark)?;
@@ -378,7 +425,7 @@ impl MarkStore {
 
     fn by_line_locked(conn: &Connection, file_id: &str, line_no: usize) -> rusqlite::Result<Option<Mark>> {
         conn.query_row(
-            "SELECT id, file_id, line_no, color, note, created_at
+            "SELECT id, file_id, line_no, color, note, col, len, created_at
              FROM marks WHERE file_id = ?1 AND line_no = ?2",
             params![file_id, line_no as i64],
             row_to_mark,
@@ -388,7 +435,7 @@ impl MarkStore {
 
     fn get_by_id_locked(conn: &Connection, id: i64) -> rusqlite::Result<Option<Mark>> {
         conn.query_row(
-            "SELECT id, file_id, line_no, color, note, created_at
+            "SELECT id, file_id, line_no, color, note, col, len, created_at
              FROM marks WHERE id = ?1",
             params![id],
             row_to_mark,
@@ -416,7 +463,9 @@ fn row_to_mark(row: &rusqlite::Row<'_>) -> rusqlite::Result<Mark> {
         line_no: row.get::<_, i64>(2)? as usize,
         color: row.get::<_, i64>(3)? as u8,
         note: row.get(4)?,
-        created_at: row.get(5)?,
+        col: row.get::<_, Option<i64>>(5)?.map(|c| c as usize),
+        len: row.get::<_, Option<i64>>(6)?.map(|l| l as usize),
+        created_at: row.get(7)?,
     })
 }
 

@@ -22,6 +22,9 @@ export interface Mark {
   line_no: number; // 1-based
   color: number;
   note: string;
+  /** 部分标记:选中文本起始偏移(0-based 字节)与长度;缺省 = 整行标记 */
+  col?: number;
+  len?: number;
   created_at: number;
 }
 

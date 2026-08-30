@@ -1,12 +1,19 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getSettings,
   setSetting,
   useSettings,
   rowHeight,
+  setResolvedBackgroundPath,
+  getResolvedBackgroundUrl,
+  resolveBackgroundImageUrl,
   type AppSettings,
   type ThemeSetting,
   type EncodingSetting,
+  type ThemeStyleSetting,
 } from "../utils/settings";
 import {
   COMMANDS,
@@ -37,6 +44,11 @@ const THEME_OPTIONS: { v: ThemeSetting; label: string }[] = [
   { v: "dark", label: "深色" },
   { v: "light", label: "浅色" },
   { v: "system", label: "跟随系统" },
+];
+
+const THEME_STYLE_OPTIONS: { v: ThemeStyleSetting; label: string }[] = [
+  { v: "solid", label: "实心(默认)" },
+  { v: "glass", label: "玻璃(毛玻璃)" },
 ];
 
 const FONT_OPTIONS: { v: string; label: string }[] = [
@@ -246,6 +258,36 @@ export default function SettingsModal({ onClose }: Props) {
   const set = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     setSetting(key, value);
 
+  // 预览状态刷新:背景 URL 是模块级异步解析,打开设置页时重解析一次并强制渲染
+  const [, force] = useState(0);
+  useEffect(() => {
+    void resolveBackgroundImageUrl().then(() => force((n) => n + 1));
+  }, []);
+
+  const pickBackground = async () => {
+    try {
+      const picked = await open({
+        parent: getCurrentWindow(),
+        title: "选择背景图片",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "bmp"] }],
+      });
+      if (typeof picked !== "string" || !picked) return;
+      const abs = await invoke<string>("set_background_image", { srcPath: picked });
+      // 先注入新 URL 再落设置(否则"新文件名+旧 URL"错配一帧)
+      setResolvedBackgroundPath(abs);
+      setSetting("backgroundImage", abs.split(/[/\\]/).pop()!);
+    } catch (e) {
+      console.error("set background failed", e);
+    }
+  };
+
+  const clearBackground = () => {
+    setResolvedBackgroundPath(null);
+    setSetting("backgroundImage", "");
+  };
+
   return (
     <div
       className="modal-overlay"
@@ -272,6 +314,31 @@ export default function SettingsModal({ onClose }: Props) {
           <div className="settings-body">
             <Row label="主题" desc="深色 / 浅色 / 跟随系统配色">
               <Select value={s.theme} options={THEME_OPTIONS} onChange={(v) => set("theme", v)} />
+            </Row>
+            <Row label="外观风格" desc="玻璃:半透明毛玻璃质感;引擎不支持背景模糊时自动回退高不透明">
+              <Select value={s.themeStyle} options={THEME_STYLE_OPTIONS} onChange={(v) => set("themeStyle", v)} />
+            </Row>
+            <Row label="背景图片" desc="玻璃风格下透过的底图;未设置时使用内置渐变">
+              <div className="settings-bg-row">
+                <button className="modal-btn" onClick={() => void pickBackground()}>
+                  选择图片…
+                </button>
+                {s.backgroundImage && (
+                  <button className="modal-btn" onClick={clearBackground}>
+                    清除
+                  </button>
+                )}
+                {s.backgroundImage &&
+                  (getResolvedBackgroundUrl() ? (
+                    <img
+                      className="settings-bg-preview"
+                      src={getResolvedBackgroundUrl()!}
+                      alt="背景预览"
+                    />
+                  ) : (
+                    <span className="settings-desc">背景加载中或原图已失效,请重新选择</span>
+                  ))}
+              </div>
             </Row>
             <Row label="字体" desc="日志视口与搜索栏等宽字体">
               <Select value={s.fontFamily} options={FONT_OPTIONS} onChange={(v) => set("fontFamily", v)} />

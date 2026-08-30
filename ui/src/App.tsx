@@ -6,7 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import LogView, { LogViewHandle } from "./components/LogView";
 import SearchBar from "./components/SearchBar";
-import FilterView from "./components/FilterView";
+import FilterView, { type FilterViewHandle } from "./components/FilterView";
 import Welcome from "./components/Welcome";
 import PinsPanel, { type Pin, type PinGroup } from "./components/PinsPanel";
 import PinsAggregate, { type FilePinsBlock } from "./components/PinsAggregate";
@@ -47,6 +47,8 @@ interface LinePayload {
 interface HitPayload {
   line_no: number;
   ranges: [number, number][];
+  /** 命中行文本(后端随事件下发),前端直接缓存进 lineCache */
+  content?: string;
 }
 
 /** 后端事件统一带 search_id:过期搜索的残留事件据此丢弃 */
@@ -93,6 +95,42 @@ interface CtxMenuState {
   lineNo: number;
   /** 右键发生在哪个文件(主 tab 或分屏右栏),菜单数据按此取 */
   fileId: string;
+  /** 部分标记:选中文本偏移/长度(有选区单行时) */
+  selCol?: number;
+  selLen?: number;
+  /** 多行选中:起止行(1-based) */
+  lineStart?: number;
+  lineEnd?: number;
+  /** contextmenu 时抓取的选区原文(有选区时存在;菜单点击时 mousedown 已清选区) */
+  selText?: string;
+}
+
+/** 从当前页面选区提取标记信息:单行选中 → 文本偏移;跨行 → 起止行;均带回选区原文 */
+function readSelection(text: string | undefined): { selCol?: number; selLen?: number; lineStart?: number; lineEnd?: number; selText?: string } {
+  const sel = window.getSelection();
+  const t = sel?.toString() ?? "";
+  if (!t) return {};
+  const getLineNo = (node: Node | null): number | null => {
+    const el = node instanceof Element ? node : node?.parentElement ?? null;
+    const logLine = el?.closest(".log-line");
+    const noEl = logLine?.querySelector<HTMLElement>(".line-no");
+    if (!noEl) return null;
+    const n = parseInt(noEl.textContent ?? "", 10);
+    return Number.isFinite(n) ? n : null;
+  };
+  const r = sel?.rangeCount ? sel.getRangeAt(0) : null;
+  if (!r) return {};
+  const a = getLineNo(r.startContainer);
+  const b = getLineNo(r.endContainer);
+  if (a != null && b != null && a !== b) {
+    return { lineStart: Math.min(a, b), lineEnd: Math.max(a, b), selText: t };
+  }
+  // 单行:在行文本里定位选中串(近似:首次出现)
+  if (a != null && text) {
+    const idx = text.indexOf(t);
+    if (idx >= 0) return { selCol: idx, selLen: t.length, selText: t };
+  }
+  return {};
 }
 
 const appWindow = getCurrentWindow();
@@ -228,6 +266,42 @@ export default function App() {
   const focusHitLinesRef = useRef(focusHitLines);
   focusHitLinesRef.current = focusHitLines;
 
+  // ── 结果内二次搜索(filter in results):在当前会话命中行里做子串 AND 过滤,
+  // 不用正则。纯前端:搜索时后端已随命中流缓存行文本进 lineCache,故直接按
+  // lineCache 过滤即可全量精确。结果为 navLines(导航集,F6/‹› 与展示共用)。
+  const [refineQuery, setRefineQuery] = useState("");
+  // 切换会话/切换文件时清空二次搜索(行号与旧内容不再对应)
+  const prevRefineSessionRef = useRef<number | null>(null);
+  useEffect(() => {
+    const focusActive = focusActiveId;
+    if (prevRefineSessionRef.current !== focusActive) {
+      prevRefineSessionRef.current = focusActive;
+      setRefineQuery("");
+    }
+  }, [focusActiveId, activeFileId, splitFileId]);
+  const refineActive = refineQuery.trim().length > 0;
+  /** 二搜后的命中间导航列表(F6/‹› 与 FilterView 展示共用) */
+  const focusNavLines = useMemo(() => {
+    if (!refineActive) return focusHitLines;
+    const q = refineQuery.trim().toLowerCase();
+    const lc = focusFile?.lineCache ?? {};
+    return focusHitLines.filter((ln) => (lc[ln - 1] ?? "").toLowerCase().includes(q));
+  }, [refineActive, refineQuery, focusHitLines, focusFile?.lineCache]);
+  const focusNavLinesRef = useRef(focusNavLines);
+  focusNavLinesRef.current = focusNavLines;
+  /** 焦点栏会话数镜像(Ctrl+F 唤起 refine 的稳定判断,避免高频重注册命令) */
+  const focusSessionsLenRef = useRef(focusSessions.length);
+  focusSessionsLenRef.current = focusSessions.length;
+  /** Ctrl+F 唤起 refine:若面板刚被展开(FilterView 未挂载),挂载后再唤起 */
+  const refineOpenPendingRef = useRef(false);
+  // 面板挂载/可见后补唤起 refine(Ctrl+F 时面板可能刚从隐藏展开,FilterView 未挂载)
+  useEffect(() => {
+    if (refineOpenPendingRef.current && filterViewRef.current) {
+      filterViewRef.current.openRefine();
+      refineOpenPendingRef.current = false;
+    }
+  });
+
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
   /** 备注注释行右键菜单(复制/编辑/删除);fileId 标记所在文件 */
   const [noteCtx, setNoteCtx] = useState<{ lineNo: number; x: number; y: number; fileId: string } | null>(null);
@@ -276,6 +350,8 @@ export default function App() {
   const splitLogRef = useRef<LogViewHandle>(null);
   /** 焦点栏的 LogView ref(搜索命中跳转滚到对应栏) */
   const focusLogRef = focusPane === "split" ? splitLogRef : logViewRef;
+  /** FILTER 命中面板 ref(Ctrl+F 唤出"结果内过滤"用) */
+  const filterViewRef = useRef<FilterViewHandle>(null);
 
   // ── 侧栏聚合数据(所有打开文件的固定/注释,按打开顺序)──
   const pinAggFiles = useMemo<FilePinsBlock[]>(
@@ -328,15 +404,22 @@ export default function App() {
   }, [activeFileId]);
 
   // 稳定引用(useCallback):LogView 已 memo,内联箭头会让 memo 失效
-  // 主/右栏各自带 fileId 的右键回调:菜单数据按"所在栏文件"取
+  // 主/右栏各自带 fileId 的右键回调:菜单数据按"所在栏文件"取;
+  // 同时读取当前选区(有选中文本 → 标记该部分/多行)
   const mainCtxMenu = useCallback(
-    (lineNo: number, x: number, y: number) =>
-      fileMeta ? setCtxMenu({ lineNo, x, y, fileId: fileMeta.id }) : undefined,
+    (lineNo: number, x: number, y: number) => {
+      if (!fileMeta) return;
+      const text = filesRef.current[fileMeta.id]?.lineCache[lineNo - 1];
+      setCtxMenu({ lineNo, x, y, fileId: fileMeta.id, ...readSelection(text) });
+    },
     [fileMeta],
   );
   const splitCtxMenu = useCallback(
-    (lineNo: number, x: number, y: number) =>
-      splitFileId ? setCtxMenu({ lineNo, x, y, fileId: splitFileId }) : undefined,
+    (lineNo: number, x: number, y: number) => {
+      if (!splitFileId) return;
+      const text = filesRef.current[splitFileId]?.lineCache[lineNo - 1];
+      setCtxMenu({ lineNo, x, y, fileId: splitFileId, ...readSelection(text) });
+    },
     [splitFileId],
   );
 
@@ -533,6 +616,15 @@ export default function App() {
     await invoke("remove_pin", { pinId }).catch((e) => console.error("remove_pin failed", e));
   }, []);
 
+  /** 删除指定文件某行的注释(仅清备注,保留颜色标记)—— 侧栏注释项用 */
+  const clearNoteAction = useCallback((fileId: string, lineNo: number) => {
+    const m = filesRef.current[fileId]?.marks[lineNo];
+    if (!m) return;
+    void invoke("add_mark", { fileId, lineNo, color: m.color, note: "" }).catch((e) =>
+      console.error("clear note failed", e),
+    );
+  }, []);
+
   const renamePinAction = useCallback((pinId: number) => {
     // pinId 全局唯一,跨文件查找名称(右键可能发生在右栏)
     let current = "";
@@ -580,13 +672,13 @@ export default function App() {
   }, []);
 
   const deletePinGroupAction = useCallback(
-    async (groupId: number) => {
-      if (!fileMeta) return;
-      await invoke("delete_pin_group", { fileId: fileMeta.id, groupId }).catch((e) =>
+    async (fileId: string, groupId: number) => {
+      if (!filesRef.current[fileId]) return;
+      await invoke("delete_pin_group", { fileId, groupId }).catch((e) =>
         console.error("delete_pin_group failed", e),
       );
     },
-    [fileMeta],
+    [],
   );
 
   const reorderPinsAction = useCallback(
@@ -802,11 +894,11 @@ export default function App() {
     }
   }, [openFile]);
 
-  /** 分屏:系统选择器打开文件到右栏(不动主 tab) */
-  /** 跳转到下一个/上一个命中(相对当前视口首行;F6 / Shift+F6) */
+  /** 跳转到下一个/上一个命中(相对当前视口首行;F6 / Shift+F6)
+   * 二搜激活时沿二次命中导航;否则沿会话全部命中 */
   const jumpToHit = useCallback((dir: 1 | -1) => {
     // 基于焦点栏的命中列表与视口,跳转到焦点栏
-    const lines = focusHitLinesRef.current;
+    const lines = focusNavLinesRef.current;
     const ref = focusLogRef.current;
     if (lines.length === 0 || !ref) return;
     const first = ref.getFirstLine() ?? 0; // 0-based 视口首行
@@ -822,6 +914,20 @@ export default function App() {
     }
   }, [focusLogRef]);
 
+  // ↑/↓ 移动行光标(klogg 焦点框);输入框/弹窗内不响应
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (document.querySelector(".modal-overlay") !== null) return;
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      e.preventDefault();
+      focusLogRef.current?.moveCursor(e.key === "ArrowUp" ? -1 : 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusLogRef]);
+
   useEffect(() => {
     const un: Array<() => void> = [];
     un.push(registerCommand("openSettings", () => setSettingsOpen(true)));
@@ -831,7 +937,20 @@ export default function App() {
       ),
     );
     un.push(registerCommand("toggleTail", () => setTailMode((t) => !t)));
-    un.push(registerCommand("focusSearch", () => searchInputRef.current?.focus()));
+    un.push(
+      registerCommand("focusSearch", () => {
+        // 有搜索结果 → Ctrl+F 唤起"结果内过滤"(klogg 式);否则聚焦底栏搜索框
+        if (focusSessionsLenRef.current > 0) {
+          // 确保面板可见(隐藏时先展开,挂载后再唤起 refine)
+          setFilterHidden(false);
+          setPopoutOpen((p) => ({ ...p, filter: false }));
+          refineOpenPendingRef.current = true;
+          filterViewRef.current?.openRefine();
+        } else {
+          searchInputRef.current?.focus();
+        }
+      }),
+    );
     un.push(registerCommand("openFile", () => void openFileDialog()));
     un.push(registerCommand("closeFile", closeFile));
     un.push(
@@ -997,6 +1116,15 @@ export default function App() {
       pendingHitsRef.current.push(
         ...hits.map((h) => ({ search_id: sid, line_no: h.line_no, ranges: h.ranges })),
       );
+      // 命中行文本随事件缓存进 lineCache:命中面板滚动零 IPC
+      const chunkFid = searchFileRef.current;
+      if (chunkFid && hits.some((h) => h.content)) {
+        mutateFile(chunkFid, (cur) => {
+          const next = { ...cur.lineCache };
+          for (const h of hits) if (h.content) next[h.line_no - 1] = h.content;
+          return { ...cur, lineCache: next };
+        });
+      }
       mutateSearchSessions((prev) =>
         prev.map((s) => (s.id === sid ? { ...s, hitCount: s.hitCount + hits.length } : s)),
       );
@@ -1244,13 +1372,23 @@ export default function App() {
 
   // ── mark actions ──
   const addMarkAction = useCallback(
-    async (fileId: string, lineNo: number, color: number) => {
-      await invoke("add_mark", { fileId, lineNo, color }).catch((e) =>
-        console.error("add_mark failed", e),
+    async (fileId: string, lineNo: number, color: number, col?: number, len?: number) => {
+      // col/len 存在 → 部分标记(选中文本区间);否则整行
+      await invoke("add_mark", { fileId, lineNo, color, col: col ?? null, len: len ?? null }).catch(
+        (e) => console.error("add_mark failed", e),
       );
     },
     [],
   );
+
+  /** 多行批量标记(默认蓝):逐行整行标记 */
+  const markRangeAction = useCallback((fileId: string, start: number, end: number) => {
+    for (let ln = start; ln <= end; ln++) {
+      void invoke("add_mark", { fileId, lineNo: ln, color: 4, col: null, len: null }).catch((e) =>
+        console.error("mark range failed", e),
+      );
+    }
+  }, []);
 
   // 复制文本:WebView2 下 navigator.clipboard 可能缺安全上下文,用 execCommand 兜底
   const copyText = (t: string) => {
@@ -1365,7 +1503,7 @@ export default function App() {
 
   const fetchLines = useCallback(
     async (start: number, count: number) => {
-      if (!fileMeta) return;
+      if (!fileMeta) return [];
       try {
         const lines = await invoke<LinePayload[]>("get_lines", {
           fileId: fileMeta.id,
@@ -1379,8 +1517,10 @@ export default function App() {
           }
           return { ...cur, lineCache: next };
         });
+        return lines;
       } catch (e) {
         console.error("get_lines failed", e);
+        return [];
       }
     },
     [fileMeta, mutateFile],
@@ -1389,7 +1529,7 @@ export default function App() {
   /** 分屏右栏的行拉取(作用于 splitFileId,独立于主视图) */
   const splitFetchLines = useCallback(
     async (start: number, count: number) => {
-      if (!splitFileId) return;
+      if (!splitFileId) return [];
       try {
         const lines = await invoke<LinePayload[]>("get_lines", { fileId: splitFileId, start, count });
         mutateFile(splitFileId, (cur) => {
@@ -1397,8 +1537,10 @@ export default function App() {
           for (const l of lines) next[l.line_no - 1] = l.text;
           return { ...cur, lineCache: next };
         });
+        return lines;
       } catch (e) {
         console.error("split get_lines failed", e);
+        return [];
       }
     },
     [splitFileId, mutateFile],
@@ -1407,7 +1549,7 @@ export default function App() {
   /** 焦点栏文件的行拉取(FilterView 命中面板用;主/右随焦点) */
   const focusFetchLines = useCallback(
     async (start: number, count: number) => {
-      if (!focusFileId) return;
+      if (!focusFileId) return [];
       try {
         const lines = await invoke<LinePayload[]>("get_lines", { fileId: focusFileId, start, count });
         mutateFile(focusFileId, (cur) => {
@@ -1415,11 +1557,39 @@ export default function App() {
           for (const l of lines) next[l.line_no - 1] = l.text;
           return { ...cur, lineCache: next };
         });
+        return lines;
       } catch (e) {
         console.error("focus get_lines failed", e);
+        return [];
       }
     },
     [focusFileId, mutateFile],
+  );
+
+  /** 行高索引测量用:仅拉取文本,不写入 lineCache(避免大文件缓存膨胀) */
+  const measureFetch = useCallback(
+    async (start: number, count: number) => {
+      if (!fileMeta) return [];
+      try {
+        return await invoke<LinePayload[]>("get_lines", { fileId: fileMeta.id, start, count });
+      } catch (e) {
+        console.error("measure get_lines failed", e);
+        return [];
+      }
+    },
+    [fileMeta],
+  );
+  const splitMeasureFetch = useCallback(
+    async (start: number, count: number) => {
+      if (!splitFileId) return [];
+      try {
+        return await invoke<LinePayload[]>("get_lines", { fileId: splitFileId, start, count });
+      } catch (e) {
+        console.error("split measure get_lines failed", e);
+        return [];
+      }
+    },
+    [splitFileId],
   );
 
   // ── 分屏派生:右栏文件状态(与主视图独立渲染,数据共享)──
@@ -1562,6 +1732,9 @@ export default function App() {
                         onJump={jumpToFileLine}
                         byFile={sidebarSections.pinsByFile}
                         onToggleView={togglePinsView}
+                        onUnpin={(_fid, pinId) => void unpinAction(pinId)}
+                        onRenamePin={(_fid, pinId) => renamePinAction(pinId)}
+                        onDeleteGroup={deletePinGroupAction}
                       />
                     )}
                     {sidebarSections.notes && (
@@ -1571,6 +1744,7 @@ export default function App() {
                         onJump={jumpToFileLine}
                         byFile={sidebarSections.notesByFile}
                         onToggleView={toggleNotesView}
+                        onDeleteNote={clearNoteAction}
                       />
                     )}
                   </div>
@@ -1585,6 +1759,7 @@ export default function App() {
               <LogView
                 ref={logViewRef}
                 lineCount={fileMeta.lines}
+                fileSize={fileMeta.size}
                 lineCache={lineCache}
                 highlightMap={activeHighlightMap}
                 marks={marks}
@@ -1595,6 +1770,7 @@ export default function App() {
                 onNoteContextMenu={(lineNo, x, y) => setNoteCtx({ lineNo, x, y, fileId: fileMeta.id })}
                 onContextMenu={mainCtxMenu}
                 fetchLines={fetchLines}
+                measureFetch={measureFetch}
                 activeHitLine={focusPane === "main" ? activeHitLine : null}
               />
               {splitFileId && splitFile && (
@@ -1623,6 +1799,7 @@ export default function App() {
                     <LogView
                       ref={splitLogRef}
                       lineCount={splitFile.meta.lines}
+                      fileSize={splitFile.meta.size}
                       lineCache={splitFile.lineCache}
                       highlightMap={splitHighlightMap}
                       marks={splitFile.marks}
@@ -1633,6 +1810,7 @@ export default function App() {
                       onNoteContextMenu={(lineNo, x, y) => setNoteCtx({ lineNo, x, y, fileId: splitFileId })}
                       onContextMenu={splitCtxMenu}
                       fetchLines={splitFetchLines}
+                      measureFetch={splitMeasureFetch}
                       activeHitLine={focusPane === "split" ? activeHitLine : null}
                     />
                   </div>
@@ -1670,6 +1848,13 @@ export default function App() {
                 onPopout={() => openPanel("filter")}
                 activeHitLine={activeHitLine}
                 onCollapse={() => setFilterHidden(true)}
+                refineActive={refineActive}
+                refineQuery={refineQuery}
+                setRefineQuery={setRefineQuery}
+                refineLines={focusNavLines}
+                ref={filterViewRef}
+                onRefinePrev={() => jumpToHit(-1)}
+                onRefineNext={() => jumpToHit(1)}
               />
             </>
           )}
@@ -1719,7 +1904,32 @@ export default function App() {
             y={ctxMenu.y}
             lineNo={ctxMenu.lineNo}
             mark={ctxMark}
-            onMark={(c) => void addMarkAction(ctxMenu.fileId, ctxMenu.lineNo, c)}
+            // 有选区(单行)→ 标记选中部分(col/len);否则整行
+            onMark={(c) =>
+              void addMarkAction(
+                ctxMenu.fileId,
+                ctxMenu.lineNo,
+                c,
+                ctxMenu.selCol,
+                ctxMenu.selLen,
+              )
+            }
+            onMarkRange={
+              ctxMenu.lineStart != null && ctxMenu.lineEnd != null
+                ? () => {
+                    markRangeAction(ctxMenu.fileId, ctxMenu.lineStart!, ctxMenu.lineEnd!);
+                    setCtxMenu(null);
+                  }
+                : undefined
+            }
+            onCopy={
+              ctxMenu.selText
+                ? () => {
+                    copyText(ctxMenu.selText!);
+                    setCtxMenu(null);
+                  }
+                : undefined
+            }
             onNote={() => void addNoteAction(ctxMenu.fileId, ctxMenu.lineNo, ctxMark?.color ?? 0)}
             onClear={() => {
               if (ctxMark) void removeMarkAction(ctxMark.id);

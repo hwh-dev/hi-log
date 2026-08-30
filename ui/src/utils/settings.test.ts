@@ -54,6 +54,8 @@ describe("loadSettings", () => {
   it("默认值与现状一致(零行为漂移)", () => {
     const s = loadSettings();
     expect(s.theme).toBe("dark");
+    expect(s.themeStyle).toBe("solid");
+    expect(s.backgroundImage).toBe("");
     expect(s.fontSize).toBe(13);
     expect(s.rowSpacing).toBe(9);
     expect(s.contextLines).toBe(0);
@@ -76,6 +78,17 @@ describe("loadSettings", () => {
     expect(s.contextLines).toBe(0); // 钳到下限
     expect(s.theme).toBe("dark"); // 非法枚举回退默认
     expect(s.encoding).toBe("gbk"); // 合法枚举保留
+    localStorage.setItem("hi-log.theme-style", "shiny");
+    localStorage.setItem("hi-log.background", "../evil.png");
+    expect(loadSettings().themeStyle).toBe("solid"); // 非法风格回退
+    expect(loadSettings().backgroundImage).toBe(""); // 路径注入拒收
+  });
+
+  it("backgroundImage 只接受固定文件名", () => {
+    localStorage.setItem("hi-log.background", "background.jpg");
+    expect(loadSettings().backgroundImage).toBe("background.jpg");
+    localStorage.setItem("hi-log.background", "C:\\Users\\u\\pic.png");
+    expect(loadSettings().backgroundImage).toBe("");
   });
 
   it("旧值兼容:theme 旧值 light 合法", () => {
@@ -100,5 +113,11 @@ describe("setSetting", () => {
     // 非 Tauri 环境下广播被 try/catch 跳过,设置本身不受影响
     expect(() => setSetting("theme", "light")).not.toThrow();
     expect(loadSettings().theme).toBe("light");
+  });
+
+  it("themeStyle 写为 glass 时 application 同步落地", () => {
+    setSetting("themeStyle", "glass", { silent: true });
+    expect(document.documentElement.dataset.themeStyle).toBe("glass");
+    setSetting("themeStyle", "solid", { silent: true }); // 恢复,避免污染其它用例
   });
 });

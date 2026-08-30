@@ -21,7 +21,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**"]
+      }
     }
   },
   "bundle": {
@@ -38,6 +42,15 @@
     "shortDescription": "跨平台高性能日志查看 / 检索工具",
     "longDescription": "hi-log 是面向开发者与运维人员的日志分析工具:GB 级文件秒开、低内存常驻、毫秒级检索响应,支持标记 / 固定分组 / tail 模式,并提供 CLI 与 MCP Server 供 AI 工具集成。",
     "copyright": "Copyright © 2026 hi-log",
+    "fileAssociations": [
+      {
+        "ext": ["log", "txt", "out", "err"],
+        "name": "日志文件",
+        "description": "日志文件(hi-log)",
+        "role": "Editor",
+        "mimeType": "text/plain"
+      }
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",

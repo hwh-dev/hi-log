@@ -20,13 +20,26 @@ interface Props {
   byFile: boolean;
   /** 区段头上的视图切换(按文件分节 ⇄ 合并);缺省不显示按钮 */
   onToggleView?: () => void;
+  /** 侧栏内编辑/删除固定(按钮 hover 展示) */
+  onUnpin?: (fileId: string, pinId: number) => void;
+  onRenamePin?: (fileId: string, pinId: number) => void;
+  onDeleteGroup?: (fileId: string, groupId: number) => void;
 }
 
 /**
- * 固定聚合面板(VS Code 风区段):区段头(折叠箭头+标题+计数)可整体折叠;
- * 内容按文件分节,点击跳转(切 tab + 滚动)。v1 只读展示 + 跳转。
+ * 固定聚合面板(VS Code 风区段):区段头可整体折叠;内容按文件分节/合并,
+ * 点击跳转(切 tab + 滚动);hover 项可重命名/取消固定、删除分组。
  */
-export default function PinsAggregate({ files, activeFileId, onJump, byFile, onToggleView }: Props) {
+export default function PinsAggregate({
+  files,
+  activeFileId,
+  onJump,
+  byFile,
+  onToggleView,
+  onUnpin,
+  onRenamePin,
+  onDeleteGroup,
+}: Props) {
   // 区段折叠(整体)
   const [sectionCollapsed, setSectionCollapsed] = useState(false);
   // 分组折叠:key = "fileId:groupId"
@@ -118,6 +131,19 @@ export default function PinsAggregate({ files, activeFileId, onJump, byFile, onT
                       </button>
                       <span className="pin-group-name">{g.name}</span>
                       <span className="pin-group-count">{list.length}</span>
+                      {onDeleteGroup && (
+                        <button
+                          className="pin-group-del"
+                          title="删除分组(组内固定移到默认组)"
+                          draggable={false}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteGroup(f.fileId, g.id);
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
                     </div>
                     {!isCollapsed &&
                       list.map((p) => (
@@ -131,6 +157,30 @@ export default function PinsAggregate({ files, activeFileId, onJump, byFile, onT
                             {p.name || `L${p.line_no.toLocaleString()}`}
                           </span>
                           <span className="pin-item-text">{f.lineText[p.line_no] ?? ""}</span>
+                          {onRenamePin && (
+                            <button
+                              className="pin-item-rename"
+                              title="重命名固定"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onRenamePin(f.fileId, p.id);
+                              }}
+                            >
+                              ✎
+                            </button>
+                          )}
+                          {onUnpin && (
+                            <button
+                              className="pin-item-remove"
+                              title="取消固定"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onUnpin(f.fileId, p.id);
+                              }}
+                            >
+                              ×
+                            </button>
+                          )}
                         </div>
                       ))}
                   </div>
@@ -153,6 +203,30 @@ export default function PinsAggregate({ files, activeFileId, onJump, byFile, onT
                   {pin.name || `L${pin.line_no.toLocaleString()}`}
                 </span>
                 <span className="pin-item-text">{text}</span>
+                {onRenamePin && (
+                  <button
+                    className="pin-item-rename"
+                    title="重命名固定"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRenamePin(fileId, pin.id);
+                    }}
+                  >
+                    ✎
+                  </button>
+                )}
+                {onUnpin && (
+                  <button
+                    className="pin-item-remove"
+                    title="取消固定"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onUnpin(fileId, pin.id);
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             ))}
           </div>

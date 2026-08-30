@@ -17,13 +17,22 @@ interface Props {
   byFile: boolean;
   /** 区段头上的视图切换(按文件分节 ⇄ 合并);缺省不显示按钮 */
   onToggleView?: () => void;
+  /** 删除注释(仅清备注,保留颜色标记) */
+  onDeleteNote?: (fileId: string, lineNo: number) => void;
 }
 
 /**
  * 注释聚合面板(VS Code 风区段):区段头可整体折叠;按文件分节或合并平铺,
- * 快速看哪些行有注释,点击跳转(切 tab + 滚动)。
+ * 快速看哪些行有注释,点击跳转(切 tab + 滚动);hover 可删除注释。
  */
-export default function NotesPanel({ files, activeFileId, onJump, byFile, onToggleView }: Props) {
+export default function NotesPanel({
+  files,
+  activeFileId,
+  onJump,
+  byFile,
+  onToggleView,
+  onDeleteNote,
+}: Props) {
   const [sectionCollapsed, setSectionCollapsed] = useState(false);
 
   const withItems = files.filter((f) => f.items.length > 0);
@@ -90,6 +99,18 @@ export default function NotesPanel({ files, activeFileId, onJump, byFile, onTogg
                   >
                     <span className="pin-item-no">L{it.lineNo.toLocaleString()}</span>
                     <span className="note-item-text">{it.note}</span>
+                    {onDeleteNote && (
+                      <button
+                        className="note-item-del"
+                        title="删除注释(保留颜色标记)"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteNote(f.fileId, it.lineNo);
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -107,6 +128,18 @@ export default function NotesPanel({ files, activeFileId, onJump, byFile, onTogg
                 <span className="pin-item-file">{it.path.split(/[/\\]/).pop()}</span>
                 <span className="pin-item-no">L{it.lineNo.toLocaleString()}</span>
                 <span className="note-item-text">{it.note}</span>
+                {onDeleteNote && (
+                  <button
+                    className="note-item-del"
+                    title="删除注释(保留颜色标记)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteNote(it.fileId, it.lineNo);
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             ))}
           </div>

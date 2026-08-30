@@ -88,7 +88,7 @@ export default function FilterPopout() {
 
   const fetchLines = useCallback(async (start: number, count: number) => {
     const fid = fileIdRef.current;
-    if (!fid) return;
+    if (!fid) return [];
     try {
       const lines = await invoke<{ text: string; line_no: number }[]>("get_lines", {
         fileId: fid,
@@ -100,8 +100,10 @@ export default function FilterPopout() {
         for (const l of lines) next[l.line_no - 1] = l.text;
         return next;
       });
+      return lines;
     } catch (e) {
       console.error("get_lines failed", e);
+      return [];
     }
   }, []);
 

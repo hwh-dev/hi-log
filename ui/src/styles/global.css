@@ -14,6 +14,10 @@
   --accent-soft: rgba(61, 142, 234, 0.15);
   --border: #363636;
   --close-hover: #e81123;
+  /* 玻璃主题:--bg-opaque 内容区不透明底色(不受玻璃半透明影响,保证可读性/滚动性能);
+     --panel-blur 面板模糊(glass 时覆写为 blur(18px) saturate(140%),实心为 none 即无操作) */
+  --bg-opaque: #1b1b1b;
+  --panel-blur: none;
   /* 渲染变量(settings.ts 运行时覆写;此处回退值与初版行为一致) */
   --font-family: "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, monospace;
   --font-size: 13px;
@@ -36,11 +40,73 @@
   --accent-soft: rgba(15, 95, 175, 0.12);
   --border: #c5c5c5;
   --close-hover: #e81123;
+  --bg-opaque: #f2f2f2;
 }
 
 /* 高亮底色在浅色下加深,保证可读 */
 :root[data-theme="light"] mark {
   background: rgba(255, 185, 0, 0.55);
+}
+
+/* ── 液态玻璃主题(设置里手动开启;默认实心)──
+   dark/light × glass 交叉:变量重定义 + 面板 backdrop-filter;
+   日志视口/命中面板内容区走 --bg-opaque 保持不透明(可读性 + 虚拟滚动性能) */
+:root[data-theme-style="glass"] {
+  --bg-primary: rgb(27 27 27 / 0.62);
+  --bg-titlebar: rgb(36 36 36 / 0.66);
+  --bg-input: rgb(42 42 42 / 0.6);
+  --bg-hover: rgb(72 72 72 / 0.5);
+  --bg-active: rgb(92 92 92 / 0.55);
+  --border: rgb(255 255 255 / 0.14);
+  --panel-blur: blur(18px) saturate(140%);
+}
+
+:root[data-theme="light"][data-theme-style="glass"] {
+  --bg-primary: rgb(242 242 242 / 0.66);
+  --bg-titlebar: rgb(238 238 238 / 0.62);
+  --bg-input: rgb(255 255 255 / 0.6);
+  --bg-hover: rgb(214 214 214 / 0.6);
+  --bg-active: rgb(205 205 205 / 0.66);
+  --border: rgb(0 0 0 / 0.16);
+}
+
+/* 引擎无 backdrop-filter(老 WebKitGTK):高不透明回退,视觉损失仅模糊不损失结构 */
+:root[data-theme-style="glass"][data-blur-fallback="1"] {
+  --bg-primary: rgb(27 27 27 / 0.96);
+  --bg-titlebar: rgb(36 36 36 / 0.96);
+  --bg-input: rgb(42 42 42 / 0.94);
+  --bg-hover: rgb(72 72 72 / 0.9);
+  --bg-active: rgb(92 92 92 / 0.92);
+  --border: rgb(255 255 255 / 0.2);
+}
+
+:root[data-theme="light"][data-theme-style="glass"][data-blur-fallback="1"] {
+  --bg-primary: rgb(242 242 242 / 0.95);
+  --bg-titlebar: rgb(238 238 238 / 0.95);
+  --bg-input: rgb(255 255 255 / 0.94);
+  --bg-hover: rgb(214 214 214 / 0.92);
+  --bg-active: rgb(205 205 205 / 0.94);
+  --border: rgb(0 0 0 / 0.18);
+}
+
+/* 面板叶片 blur 清单:只挂叶子表面,绝不挂 .app 或其祖先
+   (.ctx-menu/.modal-overlay/.findbar 是 fixed 后代,挂祖先会打乱层级与定位) */
+:root[data-theme-style="glass"] .titlebar,
+:root[data-theme-style="glass"] .tabbar,
+:root[data-theme-style="glass"] .sidebar,
+:root[data-theme-style="glass"] .searchbar,
+:root[data-theme-style="glass"] .statusbar,
+:root[data-theme-style="glass"] .pins-header,
+:root[data-theme-style="glass"] .filter-header,
+:root[data-theme-style="glass"] .popout-header,
+:root[data-theme-style="glass"] .split-header,
+:root[data-theme-style="glass"] .popout-body.sidebar,
+:root[data-theme-style="glass"] .modal,
+:root[data-theme-style="glass"] .ctx-menu,
+:root[data-theme-style="glass"] .search-suggest,
+:root[data-theme-style="glass"] .findbar {
+  -webkit-backdrop-filter: var(--panel-blur);
+  backdrop-filter: var(--panel-blur);
 }
 
 * {
@@ -62,6 +128,33 @@ body {
   background: var(--bg-primary);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
+}
+
+/* ── 玻璃背景层:内置暗蓝紫渐变(无自定义图时);用户图以 --bg-image 覆盖第一层 ──
+   负 z-index 伪元素画在 canvas 背景之上、内容之下;
+   守卫 :not([data-theme-style="glass"]) 保证实心模式全程不绘制(避免欢迎页等透明底泄漏渐变) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-color: #131314;
+  /* 中性炭黑灰层次(无彩色倾向;klogg 灰阶风,用户自定义图片才见颜色) */
+  background-image: var(--bg-image, none),
+    linear-gradient(168deg, #232326 0%, #1d1d1f 30%, #17171a 55%, #131315 78%, #101013 100%);
+  background-size: cover, cover;
+  background-position: center, center;
+  background-repeat: no-repeat, no-repeat;
+}
+
+:root[data-theme="light"] body::before {
+  /* 浅色玻璃:纯白底,无渐变(渐变色在浅色下显脏;只有自定义图才有色彩) */
+  background-color: #ececee;
+  background-image: var(--bg-image, none);
+}
+
+:root:not([data-theme-style="glass"]) body::before {
+  display: none;
 }
 
 button {
@@ -402,6 +495,8 @@ button {
   flex: 1;
   overflow: auto;
   position: relative;
+  /* 玻璃主题下保持不透明:文本可读性 + 虚拟滚动不叠模糊层 */
+  background: var(--bg-opaque);
 }
 
 .log-canvas {
@@ -412,10 +507,17 @@ button {
 .log-line {
   display: flex;
   align-items: flex-start;
+  /* 默认不换行(固定行高,无乱码);行高索引就绪后 .wrap 才开启折行 */
   white-space: pre;
   width: 100%;
   padding: 0 8px;
   border-left: 3px solid transparent;
+}
+
+/* 行高索引就绪后:长行折行显示,行高由索引精确驱动(break-all 与索引字符级测量一致) */
+.log-line.wrap {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* 备注注释行:渲染在日志行上方,代码注释风格(灰斜体小字),与日志内容区分,不写入文件 */
@@ -456,18 +558,38 @@ button {
   box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 9999px var(--accent-soft);
 }
 
+/* 行光标(klogg 式蓝框焦点行):点击/方向键/跳转都是移动它。
+   用 outline(而非 box-shadow):跳转落点的 flash 动画操作 box-shadow,
+   outline 不受其影响,光标框不会在 flash 期间消失。 */
+.log-line.cursor-line {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 命中行同时是光标行:两者叠加(左侧强调条 + 蓝框) */
+.log-line.hit-line.cursor-line {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* 跳转落点高亮:标记/快照/固定点击跳转后,目标行短暂高亮提示。
-   用 box-shadow inset 叠加(不改 background),避免覆盖标记行的标记色 */
-.log-line.flash-line {
-  animation: line-flash 1.5s ease-out;
+   用 ::before 叠一层柔和高亮、以 opacity 淡出 —— 不碰行本身的 box-shadow
+   (命中条/光标框)与 background(标记色),收尾平滑不僵硬。 */
+.log-line.flash-line::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--accent-soft);
+  pointer-events: none;
+  animation: line-flash 0.9s ease-out forwards;
 }
 
 @keyframes line-flash {
   from {
-    box-shadow: inset 0 0 0 9999px var(--accent);
+    opacity: 1;
   }
   to {
-    box-shadow: inset 0 0 0 9999px transparent;
+    opacity: 0;
   }
 }
 
@@ -774,11 +896,16 @@ button {
   font-size: 10px;
 }
 
-/* 有名称的固定:名称做主显示,加粗强调 */
+/* 有名称的固定:名称做主显示,加粗强调;可长名但单行省略,防止压到右侧按钮 */
 .pin-item-no.named {
   color: var(--text-primary);
   font-weight: 700;
   font-size: 11px;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 有名称时,行号作为次级徽标(与备注名区分) */
@@ -846,9 +973,9 @@ button {
 .pin-item-text {
   flex-basis: 100%;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 原文引用换行显示(与 .log-line.wrap 的 break-all 一致):截断丢信息,完整展示 */
+  white-space: pre-wrap;
+  word-break: break-all;
   color: var(--text-dim);
   font-size: 10px;
   padding-left: 18px; /* 缩进:归属主标签下的"原文引用",层级分明 */
@@ -1185,7 +1312,8 @@ mark {
   height: 200px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
-  background: var(--bg-primary);
+  /* 内容区不透明(玻璃主题下与 .log-viewport 一致,可读性/滚动性能) */
+  background: var(--bg-opaque);
 }
 
 .filter-header {
@@ -1311,6 +1439,7 @@ mark {
 .filter-row {
   display: flex;
   align-items: flex-start;
+  /* 固定行高(不换行):与主视图一致,虚拟滚动按行高×行号直接换算无空白 */
   white-space: pre;
   width: 100%;
   padding: 0 8px;
@@ -1867,6 +1996,20 @@ mark {
   font-size: 12px;
 }
 
+/* 背景图行:选择/清除按钮 + 预览(玻璃主题设置页) */
+.settings-bg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-bg-preview {
+  max-height: 40px;
+  max-width: 120px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
 .settings-toggle {
   min-width: 44px;
   padding: 3px 12px;
@@ -2086,9 +2229,167 @@ mark {
 .note-item-text {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 注释正文换行显示(PromptModal 录入的可含换行,pre-wrap 如实展开) */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   color: var(--text-secondary);
   font-style: italic;
+}
+
+/* 侧栏注释项:删除按钮(hover 显示) */
+.note-item-del {
+  visibility: hidden;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.note-item:hover .note-item-del {
+  visibility: visible;
+}
+
+.note-item-del:hover {
+  color: var(--close-hover);
+}
+
+/* ── 浮窗快速查找(FindBar,klogg 式):悬浮日志区顶部,不占布局 ── */
+.findbar {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200; /* 高于搜索建议(100)/弹窗(1000 以下),低于 modal */
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 6px;
+  background: var(--bg-titlebar);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 35%);
+  font-size: 12px;
+}
+
+.findbar-icon {
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 0 2px;
+}
+
+.findbar-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--mono-font, ui-monospace, "Cascadia Mono", Consolas, monospace);
+  font-size: 12px;
+  width: 220px;
+  padding: 2px 4px;
+}
+
+.findbar-input::placeholder {
+  color: var(--text-dim);
+}
+
+.findbar-count {
+  min-width: 44px;
+  text-align: right;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.findbar-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  padding: 1px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.findbar-btn:hover:not(:disabled) {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.findbar-btn:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* ── 结果内二次搜索(filter in results):FILTER 面板右上角的"在结果中过滤" ── */
+.refine-toggle.active {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
+.refine-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-left: 1px solid var(--border);
+}
+
+.refine-input {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--mono-font, ui-monospace, "Cascadia Mono", Consolas, monospace);
+  font-size: 11px;
+  padding: 1px 6px;
+  width: 150px;
+}
+
+.refine-input::placeholder {
+  color: var(--text-dim);
+}
+
+.refine-input:focus {
+  border-color: var(--accent);
+}
+
+.refine-nav {
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.refine-nav:disabled {
+  cursor: default;
+}
+
+.refine-count {
+  display: flex;
+  align-items: baseline;
+  gap: 1px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-style: normal;
+  font-size: 11px;
+  padding-left: 2px;
+}
+
+.refine-num {
+  color: var(--accent);
+  font-weight: 600;
+  font-style: normal;
+}
+
+.refine-total {
+  color: var(--text-dim);
+  font-style: normal;
 }

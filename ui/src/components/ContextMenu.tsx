@@ -22,6 +22,10 @@ interface Props {
   onRenamePin: () => void;
   /** 新建分组并固定到新组 */
   onNewGroupAndPin: () => void;
+  /** 多行选中时批量标记(蓝色整行);缺省不显示 */
+  onMarkRange?: () => void;
+  /** 有选中文本时"复制选中文本";缺省不显示 */
+  onCopy?: () => void;
   onClose: () => void;
 }
 
@@ -41,10 +45,12 @@ export default function ContextMenu({
   onRenamePin,
   onNewGroupAndPin,
   onClose,
+  onMarkRange,
+  onCopy,
 }: Props) {
   const menuW = 224;
   const menuH =
-    36 + 36 + (mark ? 26 : 0) + 34 + Math.min(pinGroups.length, 5) * 24 + 26 + (pinnedGroup ? 52 : 0) + 8;
+    36 + 36 + (mark ? 26 : 0) + (onMarkRange ? 28 : 0) + (onCopy ? 28 : 0) + 34 + Math.min(pinGroups.length, 5) * 24 + 26 + (pinnedGroup ? 52 : 0) + 8;
   const style: React.CSSProperties = {
     left: Math.max(4, Math.min(x, window.innerWidth - menuW)),
     top: Math.max(4, Math.min(y, window.innerHeight - menuH)),
@@ -63,6 +69,16 @@ export default function ContextMenu({
     >
       <div className="ctx-menu" style={style} onClick={(e) => e.stopPropagation()}>
         <div className="ctx-title">第 {lineNo.toLocaleString()} 行</div>
+        {onCopy && (
+          <button className="ctx-item" onClick={onCopy}>
+            复制选中文本
+          </button>
+        )}
+        {onMarkRange && (
+          <button className="ctx-item" onClick={onMarkRange}>
+            标记选中的多行(蓝色)
+          </button>
+        )}
         <div className="ctx-colors">
           {PALETTE_NAMES.map((name, i) => (
             <button
