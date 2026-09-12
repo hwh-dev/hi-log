@@ -14,6 +14,23 @@ pub use index::{LineIndex, LinesFrom};
 
 use crate::encoding::Encoding;
 
+/// 制表符列宽(与 CSS 默认 tab-size 一致)
+const TAB_COLS: u32 = 8;
+
+/// 是否宽字符(CJK / 全角):渲染占 2 列
+fn is_wide(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x1100..=0x115F      // 韩文字母
+        | 0x2E80..=0xA4CF    // CJK 部首/汉字/日文假名等
+        | 0xAC00..=0xD7A3    // 韩文音节
+        | 0xF900..=0xFAFF    // CJK 兼容汉字
+        | 0xFE30..=0xFE6F    // CJK 兼容形式
+        | 0xFF00..=0xFF60    // 全角形式
+        | 0xFFE0..=0xFFE6    // 全角符号
+    )
+}
+
 /// 一个已打开的日志文件。内容不读入内存,由 OS 按需分页。
 pub struct Document {
     path: PathBuf,
@@ -103,10 +120,62 @@ impl Document {
     }
 
     /// 视口批量拉取:从 `start` 起最多 `count` 行;接近 EOF 时返回更短。
+    ///
+    /// 用 `lines_from` 顺序迭代(每行 O(1)),而非逐行 `line_string`(每行从检查点
+    /// 重扫块内换行符,O(count×1024))—— 视口/索引拉取在亿级行时快数百倍。
     pub fn get_lines(&self, start: usize, count: usize) -> Vec<String> {
-        (start..start.saturating_add(count))
-            .map_while(|i| self.line_string(i))
+        self.lines_from(start)
+            .take(count)
+            .map(|(no, b)| {
+                let b = if no == 0 { self.encoding.strip_bom(b) } else { b };
+                self.encoding.decode(b).into_owned()
+            })
             .collect()
+    }
+
+    /// 计算 `[start, start+count)` 每行的**折行数**(行高索引)。
+    ///
+    /// 在后端算的原因:前端要算折行就得把整文件文本经 IPC 拉过去 —— 实测 465MB
+    /// 文件光这一步就 ~17s。此处只回传每行一个 u32。
+    ///
+    /// 列宽模型与前端渲染一致(等宽字体 + `white-space:pre-wrap; word-break:break-all`):
+    /// 半角 1 列、宽字符(CJK/全角)2 列、制表符推进到 [`TAB_COLS`] 的倍数;贪心装箱。
+    pub fn wrap_counts(&self, start: usize, count: usize, cols: u32) -> Vec<u32> {
+        let cols = cols.max(1);
+        self.lines_from(start)
+            .take(count)
+            .map(|(_, b)| self.wrap_count_line(b, cols))
+            .collect()
+    }
+
+    /// 单行折行数(见 [`Document::wrap_counts`])
+    fn wrap_count_line(&self, bytes: &[u8], cols: u32) -> u32 {
+        // 快路径:纯半角且无制表符 → 每个视觉行正好容纳 cols 个字符(日志绝大多数)。
+        // 空行也要占 1 个视觉行,故 max(1)。
+        if !bytes.iter().any(|&b| b >= 0x80 || b == b'\t') {
+            let n = bytes.len() as u32;
+            return ((n + cols - 1) / cols).max(1);
+        }
+        // 慢路径:解码后按字符宽度贪心装箱(含宽字符/制表符的行)
+        let text = self.encoding.decode(bytes);
+        let mut lines = 1u32;
+        let mut used = 0u32;
+        for ch in text.chars() {
+            let w = if ch == '\t' {
+                ((used / TAB_COLS) + 1) * TAB_COLS - used
+            } else if is_wide(ch) {
+                2
+            } else {
+                1
+            };
+            if used + w > cols {
+                lines += 1;
+                used = if w > cols { cols } else { w };
+            } else {
+                used += w;
+            }
+        }
+        lines
     }
 }
 
@@ -179,6 +248,24 @@ mod tests {
         let (_f, doc) = doc_with(b"a\nb\nc\n");
         assert_eq!(doc.get_lines(1, 10), vec!["b".to_string(), "c".to_string()]);
         assert!(doc.get_lines(3, 5).is_empty());
+    }
+
+    #[test]
+    fn wrap_counts_ascii() {
+        let (_f, doc) = doc_with(b"abcdefghij\n\nabcdefghijk\n");
+        // cols=5: 10 字符 → 2 行;空行 → 1 行;11 字符 → 3 行
+        assert_eq!(doc.wrap_counts(0, 3, 5), vec![2, 1, 3]);
+        // cols=100:全部 1 行
+        assert_eq!(doc.wrap_counts(0, 3, 100), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn wrap_counts_wide_and_tab() {
+        let (_f, doc) = doc_with("中文字\n\tAB\n".as_bytes());
+        // 宽字符按 2 列:"中文字" = 6 列,cols=4 → 2 行(2+2 / 2 → 实际 3 字符:6 列 / 4 → 2 行)
+        assert_eq!(doc.wrap_counts(0, 1, 4), vec![2]);
+        // 制表符推进到 8 的倍数:tab 占 8 列 + "AB" 2 列 = 10 列,cols=8 → 2 行
+        assert_eq!(doc.wrap_counts(1, 1, 8), vec![2]);
     }
 
     #[test]

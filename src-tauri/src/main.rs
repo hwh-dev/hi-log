@@ -75,7 +75,7 @@ async fn open_file(
         lines: doc.line_count(),
         encoding: doc.encoding().name().to_string(),
     };
-    docs.lock().unwrap().insert(path, Arc::new(doc));
+    docs.lock().unwrap_or_else(|e| e.into_inner()).insert(path, Arc::new(doc));
     // 通知前端"文件已就绪"(前端可据此刷新状态栏/进度)
     let _ = app.emit("file_opened", &meta);
     Ok(meta)
@@ -84,7 +84,7 @@ async fn open_file(
 /// 关闭文件:从文档表驱逐(mmap 释放);marks/pins 留在 SQLite,重开仍在
 #[tauri::command]
 fn close_file(state: State<AppState>, file_id: String) -> Result<(), String> {
-    state.documents.lock().unwrap().remove(&file_id);
+    state.documents.lock().unwrap_or_else(|e| e.into_inner()).remove(&file_id);
     Ok(())
 }
 
@@ -166,28 +166,58 @@ fn file_size(path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
-fn get_lines(
-    state: State<AppState>,
+async fn get_lines(
+    state: State<'_, AppState>,
     file_id: String,
     start: usize,
     count: usize,
 ) -> Result<Vec<LineData>, String> {
     let doc = state
         .documents
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .get(&file_id)
         .cloned()
         .ok_or_else(|| "file not open".to_string())?;
-    let lines: Vec<LineData> = (start..start.saturating_add(count))
-        .map_while(|i| {
-            doc.line_string(i).map(|text| LineData {
+    // 解码 + 序列化在后台线程执行,避免整块 get_lines 冻结 UI 线程
+    // (行高索引构建 / 命中面板 / 固定行文本都会高频调用此命令;
+    //  doc.get_lines 用顺序迭代,每行 O(1),而非逐行重建)
+    tauri::async_runtime::spawn_blocking(move || {
+        let lines: Vec<LineData> = doc
+            .get_lines(start, count)
+            .into_iter()
+            .enumerate()
+            .map(|(k, text)| LineData {
                 text,
-                line_no: i + 1,
+                line_no: start + k + 1,
             })
-        })
-        .collect();
-    Ok(lines)
+            .collect();
+        Ok(lines)
+    })
+    .await
+    .map_err(|e| format!("get_lines task join: {e}"))?
+}
+
+/// 行高索引:返回 `[start, start+count)` 每行的折行数(`cols` = 每视觉行可容纳列数)。
+///
+/// 在后端算 → 前端不必把整文件文本经 IPC 拉过去(465MB 文件实测省 ~17s),
+/// 只回传每行一个 u32。折行模型见 `Document::wrap_counts`。
+#[tauri::command]
+async fn measure_wraps(
+    state: State<'_, AppState>,
+    file_id: String,
+    start: usize,
+    count: usize,
+    cols: u32,
+) -> Result<Vec<u32>, String> {
+    let doc = state
+        .documents
+        .lock().unwrap_or_else(|e| e.into_inner())
+        .get(&file_id)
+        .cloned()
+        .ok_or_else(|| "file not open".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || doc.wrap_counts(start, count, cols))
+        .await
+        .map_err(|e| format!("measure_wraps task join: {e}"))
 }
 
 // ── 检索 ──
@@ -234,8 +264,7 @@ fn start_search(
 ) -> Result<u32, String> {
     let doc = state
         .documents
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .get(&file_id)
         .cloned()
         .ok_or_else(|| "file not open".to_string())?;
@@ -244,7 +273,7 @@ fn start_search(
     // (或竞态下旧线程已越过取消点),也保证同一时刻只有一个全量扫描在跑,
     // 避免 N 份扫描叠加把用户感知的耗时放大 N 倍。
     {
-        let mut tasks = search_state.tasks.lock().unwrap();
+        let mut tasks = search_state.tasks.lock().unwrap_or_else(|e| e.into_inner());
         for flag in tasks.drain().map(|(_, f)| f) {
             flag.store(true, Ordering::Relaxed);
         }
@@ -252,7 +281,7 @@ fn start_search(
 
     let id = search_state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let cancel = Arc::new(AtomicBool::new(false));
-    search_state.tasks.lock().unwrap().insert(id, cancel.clone());
+    search_state.tasks.lock().unwrap_or_else(|e| e.into_inner()).insert(id, cancel.clone());
     let tasks = search_state.tasks.clone();
 
     std::thread::spawn(move || {
@@ -318,7 +347,7 @@ fn start_search(
                 truncated: stats.truncated,
             },
         );
-        tasks.lock().unwrap().remove(&id);
+        tasks.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     });
 
     Ok(id)
@@ -326,7 +355,7 @@ fn start_search(
 
 #[tauri::command]
 fn stop_search(search_state: State<SearchState>, search_id: u32) {
-    if let Some(cancel) = search_state.tasks.lock().unwrap().get(&search_id) {
+    if let Some(cancel) = search_state.tasks.lock().unwrap_or_else(|e| e.into_inner()).get(&search_id) {
         cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -382,8 +411,7 @@ fn add_mark(
 ) -> Result<MarkPayload, String> {
     let mark = state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .add_range(&file_id, line_no, color, &note.unwrap_or_default(), col, len)
         .map_err(|e| e.to_string())?;
     emit_marks_changed(&app);
@@ -400,8 +428,7 @@ fn update_mark(
 ) -> Result<(), String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .update(mark_id, color, note.as_deref())
         .map_err(|e| e.to_string())?;
     emit_marks_changed(&app);
@@ -412,8 +439,7 @@ fn update_mark(
 fn remove_mark(app: AppHandle, state: State<MarkState>, mark_id: i64) -> Result<(), String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .remove(mark_id)
         .map_err(|e| e.to_string())?;
     emit_marks_changed(&app);
@@ -424,8 +450,7 @@ fn remove_mark(app: AppHandle, state: State<MarkState>, mark_id: i64) -> Result<
 fn list_marks(state: State<MarkState>, file_id: String) -> Result<Vec<MarkPayload>, String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .list(&file_id)
         .map_err(|e| e.to_string())
         .map(|marks| marks.into_iter().map(Into::into).collect())
@@ -484,8 +509,7 @@ fn add_pin(
 ) -> Result<PinPayload, String> {
     let pin = state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .add_pin(&file_id, line_no, group_id, &name)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
@@ -496,8 +520,7 @@ fn add_pin(
 fn remove_pin(app: AppHandle, state: State<MarkState>, pin_id: i64) -> Result<(), String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .remove_pin(pin_id)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
@@ -508,8 +531,7 @@ fn remove_pin(app: AppHandle, state: State<MarkState>, pin_id: i64) -> Result<()
 fn rename_pin(app: AppHandle, state: State<MarkState>, pin_id: i64, name: String) -> Result<PinPayload, String> {
     let pin = state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .rename_pin(pin_id, &name)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "pin not found".to_string())?;
@@ -521,8 +543,7 @@ fn rename_pin(app: AppHandle, state: State<MarkState>, pin_id: i64, name: String
 fn list_pins(state: State<MarkState>, file_id: String) -> Result<PinListPayload, String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .list_pins(&file_id)
         .map_err(|e| e.to_string())
         .map(|l| PinListPayload {
@@ -540,8 +561,7 @@ fn create_pin_group(
 ) -> Result<PinGroupPayload, String> {
     let g = state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .create_pin_group(&file_id, &name)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
@@ -557,8 +577,7 @@ fn delete_pin_group(
 ) -> Result<(), String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .delete_pin_group(&file_id, group_id)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
@@ -576,8 +595,7 @@ fn reorder_pins(
 ) -> Result<(), String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .reorder_pins(&file_id, group_id, &ids)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
@@ -594,8 +612,7 @@ fn reorder_pin_groups(
 ) -> Result<(), String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .reorder_pin_groups(&file_id, &ids)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
@@ -613,8 +630,7 @@ fn move_pin_to_group(
 ) -> Result<(), String> {
     state
         .store
-        .lock()
-        .unwrap()
+        .lock().unwrap_or_else(|e| e.into_inner())
         .move_pin_to_group(pin_id, &file_id, group_id)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
@@ -878,6 +894,7 @@ fn main() {
             log_message,
             file_size,
             get_lines,
+            measure_wraps,
             start_search,
             stop_search,
             add_mark,
