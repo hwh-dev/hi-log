@@ -197,6 +197,10 @@ export default function App() {
   const [splitFileId, setSplitFileId] = useState<string | null>(null);
   /** 搜索跳转的当前激活命中行(1-based):文档光标 + 命中列表联动 */
   const [activeHitLine, setActiveHitLine] = useState<number | null>(null);
+  /** 命中面板**自己**的光标(1-based)。与上面的文档光标分开:
+      用 F6 / 搜索框 ‹› 在正文里继续翻找时,面板光标留在你刚才看的那条结果上,
+      不会因为你移动了正文就丢失"刚看到哪条"的参照。 */
+  const [filterHitLine, setFilterHitLine] = useState<number | null>(null);
   const searchIdRef = useRef<number | null>(null);
   /** tail 重搜的被替换会话 id(search_done 后并入并删除新会话) */
   const tailReplaceRef = useRef<number | null>(null);
@@ -208,6 +212,10 @@ export default function App() {
   const lastCaseRef = useRef(false);
   // 搜索命中累积缓冲:80ms 节流合并 setState,避免高命中时 O(n) 拷贝撑爆主线程
   const pendingHitsRef = useRef<{ search_id: number; line_no: number; ranges: [number, number][] }[]>([]);
+  // 命中行文本缓存缓冲:与高亮/计数一起由 flushHits 合并,避免每 chunk 触发整树重渲染
+  const pendingLineCacheRef = useRef<Record<number, string>>({});
+  // 搜索进度缓冲:仅保留最新一次,由 flushHits 合并,避免每 progress 事件重渲染
+  const pendingProgressRef = useRef<SearchProgressPayload | null>(null);
   const flushTimerRef = useRef<number | null>(null);
   /** 当前搜索归属文件:全局单扫描,事件按此路由到对应的 FileState */
   const searchFileRef = useRef<string | null>(null);
@@ -259,6 +267,11 @@ export default function App() {
   const focusSearchRunning = focusSessions.some((s) => s.running);
   const focusSearchProgress = focusSessions.find((s) => s.running)?.progress ?? null;
   const focusHighlightMap = focusActiveSession?.highlightMap ?? {};
+  /** 焦点栏文件的固定行集合:命中面板与主视图都要显示固定标记 */
+  const focusPinSet = useMemo(
+    () => new Set((focusFile?.pins ?? []).map((p) => p.line_no)),
+    [focusFile],
+  );
   const focusHitLines = useMemo(
     () => Object.keys(focusHighlightMap).map(Number),
     [focusHighlightMap],
@@ -354,20 +367,24 @@ export default function App() {
   const filterViewRef = useRef<FilterViewHandle>(null);
 
   // ── 侧栏聚合数据(所有打开文件的固定/注释,按打开顺序)──
+  // 仅当固定/注释/分组/固定文案真正变化时(contentRev)才重算;搜索/滚动只改 lineCache/sessions,
+  // 不触发重算 —— 避免搜索期间侧栏聚合面板随 80ms flush 反复全量重渲染。
+  const [contentRev, setContentRev] = useState(0);
   const pinAggFiles = useMemo<FilePinsBlock[]>(
     () =>
-      Object.entries(files).map(([fid, f]) => ({
+      Object.entries(filesRef.current).map(([fid, f]) => ({
         fileId: fid,
         path: f.path,
         groups: f.pinGroups,
         pins: f.pins,
         lineText: f.pinLines,
       })),
-    [files],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contentRev],
   );
   const notesAggFiles = useMemo<FileNotesBlock[]>(
     () =>
-      Object.entries(files).map(([fid, f]) => ({
+      Object.entries(filesRef.current).map(([fid, f]) => ({
         fileId: fid,
         path: f.path,
         items: Object.entries(f.marks)
@@ -375,7 +392,8 @@ export default function App() {
           .map(([ln, m]) => ({ lineNo: Number(ln), note: m.note as string }))
           .sort((a, b) => a.lineNo - b.lineNo),
       })),
-    [files],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contentRev],
   );
 
   // 侧栏聚合点击跳转:目标=当前文件直接滚;否则先切 tab(done 兜底轮询)
@@ -428,10 +446,14 @@ export default function App() {
   const sidebarWidth = useSettings((s) => s.sidebarWidth);
   const sidebarSections = useSettings((s) => s.sidebarSections);
   /** 侧栏区段头一键切换:按文件分节 ⇄ 合并 */
-  const togglePinsView = () =>
-    setSetting("sidebarSections", { ...sidebarSections, pinsByFile: !sidebarSections.pinsByFile });
-  const toggleNotesView = () =>
-    setSetting("sidebarSections", { ...sidebarSections, notesByFile: !sidebarSections.notesByFile });
+  const togglePinsView = useCallback(
+    () => setSetting("sidebarSections", { ...sidebarSections, pinsByFile: !sidebarSections.pinsByFile }),
+    [sidebarSections],
+  );
+  const toggleNotesView = useCallback(
+    () => setSetting("sidebarSections", { ...sidebarSections, notesByFile: !sidebarSections.notesByFile }),
+    [sidebarSections],
+  );
   const filterHeightRef = useRef(filterHeight);
   filterHeightRef.current = filterHeight;
   const sidebarWidthRef = useRef(sidebarWidth);
@@ -545,6 +567,7 @@ export default function App() {
         const map: MarkMap = {};
         for (const m of list) map[m.line_no] = m;
         mutateFile(fileId, (cur) => ({ ...cur, marks: map }));
+        setContentRev((r) => r + 1); // 备注内容变化 → 侧栏注释聚合需重算
       } catch (e) {
         console.error("list_marks failed", e);
       }
@@ -564,6 +587,7 @@ export default function App() {
           pins: data.pins,
           pinLines: {},
         }));
+        setContentRev((r) => r + 1); // 固定列表变化 → 侧栏固定聚合需重算
         // 拉取固定行的文本,供面板展示内容预览
         const lineNos = data.pins.map((p) => p.line_no);
         const groups2: [number, number][] = [];
@@ -582,6 +606,7 @@ export default function App() {
                 for (const l of lines) next[l.line_no] = l.text;
                 return { ...cur, pinLines: next };
               });
+              setContentRev((r) => r + 1); // 固定文案填充 → 聚合预览更新
             })
             .catch((e) => console.error("get_lines failed", e));
         }
@@ -646,6 +671,10 @@ export default function App() {
       console.error("reorder_pins failed", e),
     );
   }, []);
+
+  // 侧栏固定面板稳定回调(memo 化 PinsAggregate 需要;fileId 由聚合层传入,这里忽略)
+  const pinsUnpin = useCallback((_fid: string, pinId: number) => void unpinAction(pinId), [unpinAction]);
+  const pinsRename = useCallback((_fid: string, pinId: number) => renamePinAction(pinId), [renamePinAction]);
 
   /** 打开文件(统一入口:透传编码设置;openFile 与 tail 重开共用,避免两处漂移) */
   const openWithEncoding = useCallback(async (path: string): Promise<FileMeta> => {
@@ -734,6 +763,8 @@ export default function App() {
       flushTimerRef.current = null;
     }
     pendingHitsRef.current = [];
+    pendingLineCacheRef.current = {};
+    pendingProgressRef.current = null;
     // 停止仍在跑的后端扫描,避免清空后白扫整个文件
     if (searchIdRef.current !== null) {
       void invoke("stop_search", { searchId: searchIdRef.current }).catch(() => {});
@@ -751,7 +782,12 @@ export default function App() {
     flushTimerRef.current = null;
     const batch = pendingHitsRef.current;
     pendingHitsRef.current = [];
-    if (batch.length === 0) return;
+    const cachePatch = pendingLineCacheRef.current;
+    pendingLineCacheRef.current = {};
+    const progress = pendingProgressRef.current;
+    pendingProgressRef.current = null;
+    const hasCache = Object.keys(cachePatch).length > 0;
+    if (batch.length === 0 && !hasCache && !progress) return;
     // 按会话分组合并高亮(一次 setState 批量更新全部受影响会话)
     const bySid = new Map<number, { line_no: number; ranges: [number, number][] }[]>();
     for (const h of batch) {
@@ -759,19 +795,29 @@ export default function App() {
       if (list) list.push(h);
       else bySid.set(h.search_id, [h]);
     }
-    // 命中写入发起搜索的文件(全局单扫描,searchFileRef 即归属文件)
+    // 命中写入发起搜索的文件(全局单扫描,searchFileRef 即归属文件);
+    // lineCache/进度/计数一并合并,避免搜索期间整棵 App 每个 chunk 重渲染
     const fileId = searchFileRef.current;
     if (!fileId) return;
-    mutateFile(fileId, (cur) => ({
-      ...cur,
-      sessions: cur.sessions.map((s) => {
-        const hits = bySid.get(s.id);
-        if (!hits) return s;
-        const next = { ...s.highlightMap };
-        for (const h of hits) next[h.line_no] = h.ranges;
-        return { ...s, highlightMap: next, hitCount: s.hitCount + hits.length };
-      }),
-    }));
+    mutateFile(fileId, (cur) => {
+      let lineCache = cur.lineCache;
+      if (hasCache) lineCache = { ...lineCache, ...cachePatch };
+      return {
+        ...cur,
+        lineCache,
+        sessions: cur.sessions.map((s) => {
+          const hits = bySid.get(s.id);
+          let next = s;
+          if (hits) {
+            const hm = { ...s.highlightMap };
+            for (const h of hits) hm[h.line_no] = h.ranges;
+            next = { ...s, highlightMap: hm, hitCount: s.hitCount + hits.length };
+          }
+          if (progress && progress.search_id === s.id) next = { ...next, progress };
+          return next;
+        }),
+      };
+    });
   }, [mutateFile]);
 
   /** 关闭指定文件 tab(缺省当前):驱逐后端文档,切相邻 tab */
@@ -790,6 +836,8 @@ export default function App() {
           flushTimerRef.current = null;
         }
         pendingHitsRef.current = [];
+        pendingLineCacheRef.current = {};
+        pendingProgressRef.current = null;
       }
       setFiles((prev) => {
         const next = { ...prev };
@@ -832,23 +880,27 @@ export default function App() {
 
   /** 跳转到下一个/上一个命中(相对当前视口首行;F6 / Shift+F6)
    * 二搜激活时沿二次命中导航;否则沿会话全部命中 */
-  const jumpToHit = useCallback((dir: 1 | -1) => {
-    // 基于焦点栏的命中列表与视口,跳转到焦点栏
-    const lines = focusNavLinesRef.current;
-    const ref = focusLogRef.current;
-    if (lines.length === 0 || !ref) return;
-    const first = ref.getFirstLine() ?? 0; // 0-based 视口首行
-    if (dir === 1) {
-      // 下一个:视口下方第一个命中;没有则回到第一个
-      const target = lines.find((l) => l - 1 > first) ?? lines[0];
+  const jumpToHit = useCallback(
+    (dir: 1 | -1): number | null => {
+      // 基于焦点栏的命中列表与视口,跳转到焦点栏
+      const lines = focusNavLinesRef.current;
+      const ref = focusLogRef.current;
+      if (lines.length === 0 || !ref) return null;
+      const first = ref.getFirstLine() ?? 0; // 0-based 视口首行
+      // 下一个:视口下方第一个命中;没有则回到第一个(上一个同理取最后一条)
+      const target =
+        dir === 1
+          ? lines.find((l) => l - 1 > first) ?? lines[0]
+          : [...lines].reverse().find((l) => l - 1 < first) ?? lines[lines.length - 1];
       ref.scrollToLine(target - 1);
+      // 只动**正文**光标;面板光标有自己的状态(见 filterHitLine),不跟着跑。
+      // 首次跳转时给面板光标做个初始化,避免面板一开始就没有光标。
       setActiveHitLine(target);
-    } else {
-      const target = [...lines].reverse().find((l) => l - 1 < first) ?? lines[lines.length - 1];
-      ref.scrollToLine(target - 1);
-      setActiveHitLine(target);
-    }
-  }, [focusLogRef]);
+      setFilterHitLine((cur) => (cur == null ? target : cur));
+      return target;
+    },
+    [focusLogRef],
+  );
 
   // ↑/↓ 移动行光标(klogg 焦点框);输入框/弹窗内不响应
   useEffect(() => {
@@ -1048,22 +1100,13 @@ export default function App() {
       if (e.payload.search_id !== searchIdRef.current) return;
       const sid = e.payload.search_id;
       const hits = e.payload.hits;
-      // 命中数字即时反馈,高亮 map 才 80ms 节流合并(按会话)
+      // 命中计数/高亮/行文本全部先缓冲,由 flushHits 在 80ms 内一次合并:
+      // 避免每个 chunk 都 setFiles 触发整棵 App + 子组件重渲染
       pendingHitsRef.current.push(
         ...hits.map((h) => ({ search_id: sid, line_no: h.line_no, ranges: h.ranges })),
       );
-      // 命中行文本随事件缓存进 lineCache:命中面板滚动零 IPC
-      const chunkFid = searchFileRef.current;
-      if (chunkFid && hits.some((h) => h.content)) {
-        mutateFile(chunkFid, (cur) => {
-          const next = { ...cur.lineCache };
-          for (const h of hits) if (h.content) next[h.line_no - 1] = h.content;
-          return { ...cur, lineCache: next };
-        });
-      }
-      mutateSearchSessions((prev) =>
-        prev.map((s) => (s.id === sid ? { ...s, hitCount: s.hitCount + hits.length } : s)),
-      );
+      // 命中行文本随事件缓存进 lineCache:命中面板滚动零 IPC(延迟到 flushHits 写入)
+      for (const h of hits) if (h.content) pendingLineCacheRef.current[h.line_no - 1] = h.content;
       if (flushTimerRef.current === null) {
         flushTimerRef.current = window.setTimeout(flushHits, 80);
       }
@@ -1075,10 +1118,11 @@ export default function App() {
 
     listen<SearchProgressPayload>("search_progress", (e) => {
       if (e.payload.search_id !== searchIdRef.current) return;
-      const sid = e.payload.search_id;
-      mutateSearchSessions((prev) =>
-        prev.map((s) => (s.id === sid ? { ...s, progress: e.payload } : s)),
-      );
+      // 仅保留最新一次进度,由 flushHits 合并,避免每个 progress 事件重渲染整树
+      pendingProgressRef.current = e.payload;
+      if (flushTimerRef.current === null) {
+        flushTimerRef.current = window.setTimeout(flushHits, 80);
+      }
       if (popoutOpenRef.current.filter) {
         void appWindow.emitTo("filter-popout", "search_progress_fwd", e.payload).catch(() => {});
       }
@@ -1515,6 +1559,31 @@ export default function App() {
     },
     [fileMeta],
   );
+  /** 行高索引(等宽字体):后端直接算折行数,只回传每行一个数字,不传文本 */
+  const measureWraps = useCallback(
+    async (start: number, count: number, cols: number) => {
+      if (!fileMeta) return [];
+      try {
+        return await invoke<number[]>("measure_wraps", { fileId: fileMeta.id, start, count, cols });
+      } catch (e) {
+        console.error("measure_wraps failed", e);
+        return [];
+      }
+    },
+    [fileMeta],
+  );
+  const splitMeasureWraps = useCallback(
+    async (start: number, count: number, cols: number) => {
+      if (!splitFileId) return [];
+      try {
+        return await invoke<number[]>("measure_wraps", { fileId: splitFileId, start, count, cols });
+      } catch (e) {
+        console.error("split measure_wraps failed", e);
+        return [];
+      }
+    },
+    [splitFileId],
+  );
   const splitMeasureFetch = useCallback(
     async (start: number, count: number) => {
       if (!splitFileId) return [];
@@ -1545,6 +1614,36 @@ export default function App() {
     }
     runningRef.current = false;
   }, []);
+
+  // FilterView 稳定回调(memo 化命中面板需要,避免内联箭头致 memo 失效)
+  /** 点命中面板某条结果:正文滚过去,并把**两处光标**都设到这条
+      (这是显式"去看这条",两处应当一致;而正文里 F6/‹› 翻找时只动正文光标) */
+  const filterJump = useCallback(
+    (l: number) => {
+      if (focusPane === "split") splitLogRef.current?.scrollToLine(l);
+      else logViewRef.current?.scrollToLine(l);
+      setActiveHitLine(l + 1);
+      setFilterHitLine(l + 1);
+    },
+    [focusPane],
+  );
+  const filterCtx = useCallback(
+    (lineNo: number, x: number, y: number) => {
+      if (focusFileId) setCtxMenu({ lineNo, x, y, fileId: focusFileId });
+    },
+    [focusFileId],
+  );
+  const filterPopout = useCallback(() => openPanel("filter"), [openPanel]);
+  const filterCollapse = useCallback(() => setFilterHidden(true), []);
+  // 面板内的 ‹› 属于"面板自己的导航":正文光标跟着走,面板光标也更新到同一条
+  const filterRefinePrev = useCallback(() => {
+    const t = jumpToHit(-1);
+    if (t != null) setFilterHitLine(t);
+  }, [jumpToHit]);
+  const filterRefineNext = useCallback(() => {
+    const t = jumpToHit(1);
+    if (t != null) setFilterHitLine(t);
+  }, [jumpToHit]);
 
   return (
     <div className={`app ${dropActive ? "app-dropping" : ""}`}>
@@ -1668,8 +1767,8 @@ export default function App() {
                         onJump={jumpToFileLine}
                         byFile={sidebarSections.pinsByFile}
                         onToggleView={togglePinsView}
-                        onUnpin={(_fid, pinId) => void unpinAction(pinId)}
-                        onRenamePin={(_fid, pinId) => renamePinAction(pinId)}
+                        onUnpin={pinsUnpin}
+                        onRenamePin={pinsRename}
                         onReorder={reorderPinsAction}
                       />
                     )}
@@ -1707,6 +1806,7 @@ export default function App() {
                 onContextMenu={mainCtxMenu}
                 fetchLines={fetchLines}
                 measureFetch={measureFetch}
+                measureWraps={measureWraps}
                 activeHitLine={focusPane === "main" ? activeHitLine : null}
               />
               {splitFileId && splitFile && (
@@ -1747,6 +1847,7 @@ export default function App() {
                       onContextMenu={splitCtxMenu}
                       fetchLines={splitFetchLines}
                       measureFetch={splitMeasureFetch}
+                      measureWraps={splitMeasureWraps}
                       activeHitLine={focusPane === "split" ? activeHitLine : null}
                     />
                   </div>
@@ -1772,25 +1873,24 @@ export default function App() {
                 lineCache={focusFile?.lineCache ?? {}}
                 highlightMap={focusHighlightMap}
                 marks={focusFile?.marks ?? {}}
+                pins={focusPinSet}
                 fetchLines={focusFetchLines}
-                onJump={(l) => focusLogRef.current?.scrollToLine(l)}
-                onContextMenu={(lineNo, x, y) =>
-                  focusFileId ? setCtxMenu({ lineNo, x, y, fileId: focusFileId }) : undefined
-                }
+                onJump={filterJump}
+                onContextMenu={filterCtx}
                 hitCount={focusHitCount}
                 truncated={focusTruncated}
                 height={filterHeight}
                 lineCount={focusFile?.meta.lines ?? 0}
-                onPopout={() => openPanel("filter")}
-                activeHitLine={activeHitLine}
-                onCollapse={() => setFilterHidden(true)}
+                onPopout={filterPopout}
+                activeHitLine={filterHitLine}
+                onCollapse={filterCollapse}
                 refineActive={refineActive}
                 refineQuery={refineQuery}
                 setRefineQuery={setRefineQuery}
                 refineLines={focusNavLines}
                 ref={filterViewRef}
-                onRefinePrev={() => jumpToHit(-1)}
-                onRefineNext={() => jumpToHit(1)}
+                onRefinePrev={filterRefinePrev}
+                onRefineNext={filterRefineNext}
               />
             </>
           )}

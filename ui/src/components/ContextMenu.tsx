@@ -37,8 +37,7 @@ export default function ContextMenu({
   onCopy,
 }: Props) {
   const menuW = 224;
-  const menuH =
-    36 + 36 + (mark ? 26 : 0) + (onMarkRange ? 28 : 0) + (onCopy ? 28 : 0) + 34 + 28 + 8;
+  const menuH = 36 + 36 + (onMarkRange ? 28 : 0) + (onCopy ? 28 : 0) + 34 + 28 + 8;
   const style: React.CSSProperties = {
     left: Math.max(4, Math.min(x, window.innerWidth - menuW)),
     top: Math.max(4, Math.min(y, window.innerHeight - menuH)),
@@ -67,7 +66,17 @@ export default function ContextMenu({
             标记选中的多行(蓝色)
           </button>
         )}
+        {/* 颜色组 = [无] + 8 色。klogg 式:清除标记就是"选无色",
+            不需要单独一个"清除标记"按钮。该行没有标记时"无"即选中态。
+            ⚠️ "无"只在 UI 层,不能加进 PALETTE —— PALETTE 的下标与后端
+            marks.color(u8) 严格对应,插入一项会让所有已存标记颜色错位。 */}
         <div className="ctx-colors">
+          <button
+            className={`ctx-color none${mark ? "" : " selected"}`}
+            title="无(清除标记)"
+            aria-label="清除标记"
+            onClick={onClear}
+          />
           {PALETTE_NAMES.map((name, i) => (
             <button
               key={i}
@@ -82,11 +91,6 @@ export default function ContextMenu({
         <button className="ctx-item" onClick={onNote}>
           {mark?.note ? "修改备注…" : "写备注…"}
         </button>
-        {mark && (
-          <button className="ctx-item danger" onClick={onClear}>
-            清除标记
-          </button>
-        )}
 
         {/* ── 固定/取消固定:一次点击零输入(改名去侧栏 hover)── */}
         <div className="ctx-pins-label">📌 固定</div>

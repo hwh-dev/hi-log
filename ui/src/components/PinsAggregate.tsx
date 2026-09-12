@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import type { Pin, PinGroup } from "./PinsPanel";
 import { useSettings, setSetting, type PinsSortSetting } from "../utils/settings";
 
@@ -45,7 +45,7 @@ function sortPins(pins: Pin[], mode: PinsSortSetting): Pin[] {
  * 点击跳转;hover 可重命名/取消固定;排序=标记时间/文件中顺序/手动拖拽(仅分节+手动时可拖)。
  * 分组概念已从 UI 撤销(数据兼容保留)。
  */
-export default function PinsAggregate({
+function PinsAggregate({
   files,
   activeFileId,
   onJump,
@@ -105,7 +105,14 @@ export default function PinsAggregate({
       onClick={() => onJump(fileId, p.line_no - 1)}
     >
       {fileTag && <span className="pin-item-file">{fileTag}</span>}
-      <span className={`pin-item-no${p.name ? " named" : ""}`}>{p.name || `L${p.line_no.toLocaleString()}`}</span>
+      {/* 行号永远做主显示(固定的身份),自定义名字降为次级标签 ——
+          否则一个恰好长成数字的旧名字(如 "3131")会被误当成错误行号 */}
+      <span className="pin-item-no">{`L${p.line_no.toLocaleString()}`}</span>
+      {p.name && (
+        <span className="pin-item-name" title={p.name}>
+          {p.name}
+        </span>
+      )}
       <span className="pin-item-text">{text}</span>
       {onRenamePin && (
         <button
@@ -223,3 +230,6 @@ export default function PinsAggregate({
     </div>
   );
 }
+
+// memo:搜索/滚动只改 lineCache/sessions 时,聚合 props 不变,侧栏不再随 80ms flush 重渲染
+export default memo(PinsAggregate);

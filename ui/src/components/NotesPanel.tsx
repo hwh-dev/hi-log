@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 
 /** 单文件的注释数据块(侧栏聚合用) */
 export interface FileNotesBlock {
@@ -25,7 +25,7 @@ interface Props {
  * 注释聚合面板(VS Code 风区段):区段头可整体折叠;按文件分节或合并平铺,
  * 快速看哪些行有注释,点击跳转(切 tab + 滚动);hover 可删除注释。
  */
-export default function NotesPanel({
+function NotesPanel({
   files,
   activeFileId,
   onJump,
@@ -147,3 +147,6 @@ export default function NotesPanel({
     </div>
   );
 }
+
+// memo:搜索/滚动只改 lineCache/sessions 时,聚合 props 不变,侧栏不再随 80ms flush 重渲染
+export default memo(NotesPanel);

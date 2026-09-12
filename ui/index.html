@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>hi-log</title>
+    <!-- 首帧背景兜底:tauri dev 下 CSS 由 JS 注入(bundle 前是浏览器默认白底),
+         这里同步读已存储的主题给 html 上底色,避免白闪/暗闪。
+         ⚠️ 绝不能给 #root 设背景:global.css 从不为 #root 设背景(它是透明的),
+         一旦这里把它设成不透明纯色就再也不会被覆盖,于是所有透明间隙
+         (4px 分隔条 .sidebar-resizer/.filter-resizer、.app)都会透出该纯色 ——
+         浅色主题下就表现为面板边界的"黑边"。 -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("hi-log.theme"); // "light" | "dark" | "system" | null
+          var light =
+            t === "light" ||
+            (t === "system" && window.matchMedia("(prefers-color-scheme: light)").matches);
+          document.documentElement.style.background = light ? "#f2f2f2" : "#1b1b1b";
+          document.documentElement.style.colorScheme = light ? "light" : "dark";
+        } catch (e) {
+          /* localStorage 不可用时保持默认 */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

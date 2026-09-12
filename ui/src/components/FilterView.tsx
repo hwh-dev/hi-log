@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useMemo, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useRef, useState, useEffect, useMemo, useCallback, forwardRef, useImperativeHandle, memo } from "react";
 import { highlightText } from "../utils/highlight";
 import { paletteColor, type Mark } from "../utils/palette";
 import { useSettings, getSettings, setSetting, expandContext } from "../utils/settings";
@@ -28,6 +28,8 @@ interface Props {
   highlightMap: Record<number, [number, number][]>;
   /** 行号(1-based) → 标记(命中行左侧色条) */
   marks: Record<number, Mark>;
+  /** 已固定的行号集合(1-based):命中面板也要显示固定标记,与主视图一致 */
+  pins?: ReadonlySet<number>;
   fetchLines: (start: number, count: number) => Promise<{ text: string; line_no: number }[]>;
   onJump: (lineNo0: number) => void;
   /** 右键命中行(标记) */
@@ -64,6 +66,11 @@ export interface FilterViewHandle {
 const BUFFER = 18;
 /** 稠密命中防御:开启上下文(±N>0)时最多展示的行数(虚拟滚动只渲染视口,截断仅影响可跳转性) */
 const MAX_DISPLAY_LINES = 2_000_000;
+/** Chromium 元素高度上限约 33.5M px:超过时 DOM 滚不动(被 clamp)。固定行高
+    命中面板同样受此限制,换算走"逻辑坐标",DOM 只当滚动条 —— 稠密命中不出空白/滚动失效。 */
+const LIMIT_H = 33_000_000;
+/** 行块位移拆分量(与 LogView 一致):大数值 transform 在 f32 下会丢精度 */
+const ROWS_BASE_UNIT = 1_000_000;
 
 /** 计算 query 在 text 中的所有匹配字节区间(供 highlightText 用,多次出现全部标出) */
 function findByteRanges(text: string, query: string): [number, number][] {
@@ -83,7 +90,7 @@ function findByteRanges(text: string, query: string): [number, number][] {
   return out;
 }
 
-export default forwardRef<FilterViewHandle, Props>(function FilterView(
+const FilterView = forwardRef<FilterViewHandle, Props>(function FilterView(
   {
     sessions,
     activeId,
@@ -93,6 +100,7 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
     lineCache,
     highlightMap,
     marks,
+    pins,
     fetchLines,
     onJump,
     onContextMenu,
@@ -117,6 +125,10 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
   const [viewHeight, setViewHeight] = useState(0);
   // 行高 = 字号 + 行距(设置层唯一公式,与 LogView 同步)
   const rowHeight = useSettings((s) => s.fontSize + s.rowSpacing);
+  /** 行块容器:滚动时同步写 transform(不经 React),与滚动同帧 */
+  const rowsRef = useRef<HTMLDivElement>(null);
+  const rowHeightRef = useRef(rowHeight);
+  rowHeightRef.current = rowHeight;
 
   // 结果内过滤:默认隐藏,Ctrl+F / 面板右上角按钮唤起(openRefine)
   const [refineOpen, setRefineOpen] = useState(false);
@@ -195,6 +207,26 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
   );
 
 
+  // ── 逻辑坐标 ↔ DOM 坐标(33M clamp):固定行高,无换行累计 ──
+  const logicalH = displayLines.length * rowHeight;
+  const domH = Math.min(logicalH, LIMIT_H);
+  const domToS = useCallback(
+    (st: number): number => {
+      if (domH >= logicalH) return st;
+      const domMax = Math.max(1, domH - viewHeight);
+      return (st * Math.max(0, logicalH - viewHeight)) / domMax;
+    },
+    [domH, logicalH, viewHeight],
+  );
+  const sToDom = useCallback(
+    (s: number): number => {
+      if (domH >= logicalH) return s;
+      const domMax = Math.max(1, domH - viewHeight);
+      return (s * domMax) / Math.max(1, logicalH - viewHeight);
+    },
+    [domH, logicalH, viewHeight],
+  );
+
   // 搜索跳转(‹›):命中列表跟随滚动到当前激活命中行(与文档视口联动)。
   // 固定行高:idx * rowHeight 直接换算,无换行累计,天然无空白。
   useEffect(() => {
@@ -203,16 +235,38 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
     if (idx < 0 || !containerRef.current) return;
     const el = containerRef.current;
     const top = Math.max(0, idx * rowHeight - el.clientHeight / 2);
-    el.scrollTop = top;
-    setScrollTop(top);
-  }, [activeHitLine, displayLines, rowHeight]);
+    el.scrollTop = sToDom(top);
+    setScrollTop(el.scrollTop);
+  }, [activeHitLine, displayLines, rowHeight, sToDom]);
 
   const range = useMemo(() => {
     if (viewHeight === 0) return { start: 0, end: 0 };
-    const start = Math.max(0, Math.floor(scrollTop / rowHeight) - BUFFER);
+    const logicalS = domToS(scrollTop);
+    const start = Math.max(0, Math.floor(logicalS / rowHeight) - BUFFER);
     const count = Math.ceil(viewHeight / rowHeight) + BUFFER * 2;
     return { start, end: Math.min(displayLines.length, start + count) };
-  }, [scrollTop, viewHeight, displayLines.length, rowHeight]);
+  }, [scrollTop, viewHeight, displayLines.length, rowHeight, domToS]);
+
+  // 滚动:①同步写行块 transform(不经 React → 与滚动同帧,消除滚轮"掉帧"感);
+  // ②再 setScrollTop,让 React 只在可见区间变化时重建行(低频)。
+  const rangeStartRef = useRef(range.start);
+  rangeStartRef.current = range.start;
+  const domToSRef = useRef(domToS);
+  domToSRef.current = domToS;
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const st = el.scrollTop;
+    const rows = rowsRef.current;
+    if (rows) {
+      const shift = rangeStartRef.current * rowHeightRef.current - domToSRef.current(st) + st;
+      const base = Math.floor(shift / ROWS_BASE_UNIT) * ROWS_BASE_UNIT;
+      const basePx = `${base}px`;
+      if (rows.style.top !== basePx) rows.style.top = basePx;
+      rows.style.transform = `translateY(${shift - base}px)`;
+    }
+    setScrollTop(st);
+  }, []);
 
   const visibleLines = useMemo(
     () => displayLines.slice(range.start, range.end),
@@ -246,9 +300,11 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
     void fetchVisible();
   }, [fetchVisible]);
 
-  // 行定位:固定行高,首行贴视口顶(起始 top 由 range.start 直接换算)
-  let y = range.start * rowHeight;
-  const rowNodes = visibleLines.map((ln) => {
+  // 行块:局部坐标(相对 range.start)+ 外层 .filter-rows 单次 transform 承担滚动偏移。
+  // 既让滚动时不重建行,也保证大结果集(33M 压缩)下行的位置与画布一致。
+  const rowNodes = useMemo(() => {
+  let y = 0;
+  return visibleLines.map((ln) => {
     const lineNo0 = ln - 1;
     const text = lineCache[lineNo0] ?? "";
     // 二次搜索激活:二次命中行左缘强调 + 命中词黄色高亮;上下文行恢复调暗
@@ -256,6 +312,8 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
     const isHit = refineActive ? isRefineHit : ln in highlightMap;
     const mark = marks[ln];
     const markColor = mark ? paletteColor(mark.color) : undefined;
+    // 固定标记与主视图一致:左侧圆点 + 整行淡色底(见 .filter-row.pinned)
+    const pinned = pins?.has(ln) ?? false;
     // 正文高亮:二次搜索 → 命中子串;否则 → 主搜索命中区间
     const bodyText = text
       ? isRefineHit && refineQuery.trim()
@@ -267,7 +325,9 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
     const node = (
       <div
         key={ln}
-        className={`filter-row ${isHit ? "" : "ctx"}`}
+        className={`filter-row ${isHit ? "" : "ctx"}${pinned ? " pinned" : ""}${
+          ln === activeHitLine ? " hit-cursor" : ""
+        }`}
         style={{
           position: "absolute",
           top: y,
@@ -283,6 +343,7 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
         }}
       >
         <span className="filter-line-no">{String(ln).padStart(7, " ")}</span>
+        {pinned && <span className="pin-dot" title="已固定" />}
         <span className="line-mark-icon">{mark?.note ? "📝" : ""}</span>
         <span className="filter-text">{bodyText}</span>
       </div>
@@ -290,7 +351,13 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
     y += rowHeight;
     return node;
   });
-  const canvasH = displayLines.length * rowHeight;
+  }, [visibleLines, lineCache, refineActive, refineSet, highlightMap, marks, pins, refineQuery, rowHeight, onJump, onContextMenu, activeHitLine]);
+
+  // 行块整体位移(含 33M 压缩映射):布局 top 承担 1M 的整数倍(精确),
+  // 余量交 transform(数值小,f32 精度足够),避免大数值 transform 抖动
+  const rowsShift = range.start * rowHeight - domToS(scrollTop) + scrollTop;
+  const rowsBase = Math.floor(rowsShift / ROWS_BASE_UNIT) * ROWS_BASE_UNIT;
+  const rowsResidual = rowsShift - rowsBase;
 
   return (
     <div className="filter-view" style={height !== undefined ? { height } : undefined}>
@@ -411,11 +478,18 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
       <div
         className="filter-body"
         ref={containerRef}
-        onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+        onScroll={handleScroll}
       >
         {active && displayLines.length > 0 ? (
-          <div className="filter-canvas" style={{ height: canvasH }}>
-            {rowNodes}
+          <div className="filter-canvas" style={{ height: domH }}>
+            {/* 行块整体位移:滚动时只改这一个元素(布局 top 精确 + 小 transform 走合成层) */}
+            <div
+              className="filter-rows"
+              ref={rowsRef}
+              style={{ top: rowsBase, transform: `translateY(${rowsResidual}px)` }}
+            >
+              {rowNodes}
+            </div>
           </div>
         ) : (
           <div className="filter-empty">
@@ -426,3 +500,6 @@ export default forwardRef<FilterViewHandle, Props>(function FilterView(
     </div>
   );
 });
+
+// memo:回调已稳定化,App 因其它状态(侧栏聚合/tab/布局)重渲染时,命中面板不随之重渲染
+export default memo(FilterView);

@@ -17,6 +17,8 @@
   /* 玻璃主题:--bg-opaque 内容区不透明底色(不受玻璃半透明影响,保证可读性/滚动性能);
      --panel-blur 面板模糊(glass 时覆写为 blur(18px) saturate(140%),实心为 none 即无操作) */
   --bg-opaque: #1b1b1b;
+  /* 已固定行的整行淡色底(比 accent-soft 略强,以便一眼看出哪些行被固定了) */
+  --pin-bg: rgba(61, 142, 234, 0.16);
   --panel-blur: none;
   /* 渲染变量(settings.ts 运行时覆写;此处回退值与初版行为一致) */
   --font-family: "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, monospace;
@@ -41,6 +43,7 @@
   --border: #c5c5c5;
   --close-hover: #e81123;
   --bg-opaque: #f2f2f2;
+  --pin-bg: rgba(15, 95, 175, 0.13);
 }
 
 /* 高亮底色在浅色下加深,保证可读 */
@@ -504,6 +507,45 @@ button {
   min-width: 100%;
 }
 
+/* 行块容器:行用局部坐标,整体滚动偏移由这里一次位移承担(滚动时只改这一个元素)。
+   刻意不用 will-change: 画布高达 33M px,提升为合成层会在栅格化时出现黑边/空白。 */
+.log-rows {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+/* 未拉取行的骨架占位:打开文件/快速滚动拉取滞后时,替代整块空白 */
+.log-skeleton {
+  display: inline-block;
+  width: 55%;
+  height: 1em;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-dim) 22%, transparent);
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+/* 行高索引进度条:sticky 贴视口顶,索引构建期间可见,完成后消失 */
+.log-index-progress {
+  position: sticky;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  padding: 3px 8px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border);
+  pointer-events: none;
+}
+
 .log-line {
   display: flex;
   align-items: flex-start;
@@ -512,12 +554,34 @@ button {
   width: 100%;
   padding: 0 8px;
   border-left: 3px solid transparent;
+  /* 行高由索引驱动;索引与实际折行短暂不一致时(静默重算中)裁掉溢出,避免压到下一行 */
+  overflow: hidden;
 }
 
 /* 行高索引就绪后:长行折行显示,行高由索引精确驱动(break-all 与索引字符级测量一致) */
 .log-line.wrap {
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* ── 已固定的行:整行提示(比单个圆点明显得多,且与标记色/命中框共存)──
+   ① 行号着色:只改颜色、不改字形宽度 → 不影响实际折行与行高索引;
+   ② 整行淡色底:用 ::after 覆盖层而不是 background —— 标记行已有行内 backgroundColor
+      (行内优先级高于 class,class 背景会被盖掉),覆盖层还能与标记底色叠加;
+      pointer-events:none 保证右键/选中/点击不受影响。
+   刻意不用 font-weight:等宽字体加粗会改变实际折行,与行高索引不一致。 */
+.log-line.pinned .line-no {
+  color: var(--accent);
+}
+.log-line.pinned::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--pin-bg);
+  pointer-events: none;
 }
 
 /* 备注注释行:渲染在日志行上方,代码注释风格(灰斜体小字),与日志内容区分,不写入文件 */
@@ -913,6 +977,18 @@ button {
   text-overflow: ellipsis;
 }
 
+/* 自定义名字:次级标签(行号才是主显示,名字不会冒充行号);长名单行省略 */
+.pin-item-name {
+  color: var(--text-secondary);
+  font-size: 10px;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 有名称时,行号作为次级徽标(与备注名区分) */
 .pin-item-meta {
   color: var(--text-dim);
@@ -989,10 +1065,19 @@ button {
 /* ── pin dot in log lines(书签圆点,区别于标记的左侧色条)── */
 
 .pin-dot {
-  /* 绝对定位覆盖在行号左侧空位:不占流,固定行文本不再缩进 */
+  /* 绝对定位,不占流(固定行文本不再缩进) */
   position: absolute;
-  left: 10px;
-  top: 50%;
+  /* 横向:放在**行号左侧**的空位里。
+     行号右对齐、7~8 位数字基本占满 48px 列,列内左侧已无空间;
+     所以用 .log-line 的 padding-left(8px)这块:left:3px → 点占 3~9px,
+     与左侧标记色条(3px)留 3px 缝,离行号数字(从 16px 起)还有 7px 余量。
+     ⚠️ 若改 .log-line 的 padding 或 .line-no 的宽度,这里要同步。 */
+  left: 3px;
+  /* 纵向:对齐该行**第一条视觉行**里**数字的光学中心**(实测误差 <1px)。
+     · 用 --row-height 而非 50%:50% 是相对整块高度,行折成多行时会掉到第一行下沿;
+     · 再往上减 0.27×字号:数字没有下伸部,字形中心比行盒中心高约 0.27em,
+       不减的话点看起来总是偏下(实测 11px 字号偏 4.5px)。 */
+  top: calc(var(--row-height) / 2 - var(--font-size) * 0.27);
   transform: translateY(-50%);
   width: 6px;
   height: 6px;
@@ -1053,6 +1138,21 @@ button {
 
 .ctx-color.selected {
   border-color: var(--text-primary);
+}
+
+/* 颜色组里的"无"(清除标记):空底色 + 斜线,一眼区别于 8 个实心色。
+   内框用 inset 阴影而非 border —— border-color 要留给 .ctx-color.selected 表示选中态
+   (两者 specificity 相同,写成 border 会把选中态盖掉)。 */
+.ctx-color.none {
+  background: linear-gradient(
+      to top right,
+      transparent 44%,
+      var(--text-dim) 44%,
+      var(--text-dim) 56%,
+      transparent 56%
+    ),
+    var(--bg-input);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 
 .ctx-item {
@@ -1439,6 +1539,14 @@ mark {
 .filter-canvas {
   position: relative;
   min-width: 100%;
+}
+
+/* 行块容器:行用局部坐标,整体滚动偏移由这里一次位移承担(同 .log-rows;不用 will-change) */
+.filter-rows {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
 }
 
 .filter-row {
@@ -2083,6 +2191,33 @@ mark {
 .filter-row.ctx .filter-line-no,
 .filter-row.ctx .filter-text {
   color: var(--text-dim);
+}
+
+/* 命中面板**自己的光标框**(与主视图 .log-line.cursor-line 同一观感)。
+   由 App 的 filterHitLine 驱动:面板里点选结果 / 面板内 ‹› 导航时移动;
+   在正文里用 F6 / 搜索框 ‹› 翻找时**不动** —— 这样你移动正文时,
+   面板仍留着"刚看的那条结果"的框,不会失去参照。 */
+.filter-row.hit-cursor {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 命中面板里的固定行:与主视图 .log-line.pinned 一致
+   (行号着色 + 整行淡色底;左侧圆点由 .pin-dot 负责 —— .filter-row 的
+    padding/border/行号列宽度与 .log-line 完全相同,所以定位可直接复用)。
+   放在 .filter-row.ctx 之后:两者 specificity 相同,靠顺序保证固定行不被调暗。 */
+.filter-row.pinned .filter-line-no {
+  color: var(--accent);
+}
+.filter-row.pinned::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--pin-bg);
+  pointer-events: none;
 }
 
 .ctx-badge {
