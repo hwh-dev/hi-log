@@ -16,6 +16,7 @@
         "width": 1200,
         "height": 800,
         "decorations": false,
+        "backgroundColor": "#1b1b1b",
         "minWidth": 600,
         "minHeight": 400
       }
@@ -44,9 +45,16 @@
     "copyright": "Copyright © 2026 hi-log",
     "fileAssociations": [
       {
-        "ext": ["log", "txt", "out", "err"],
+        "ext": ["log"],
         "name": "日志文件",
         "description": "日志文件(hi-log)",
+        "role": "Editor",
+        "mimeType": "text/x-log"
+      },
+      {
+        "ext": ["txt", "out", "err"],
+        "name": "文本日志",
+        "description": "文本日志(hi-log)",
         "role": "Editor",
         "mimeType": "text/plain"
       }

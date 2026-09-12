@@ -18,6 +18,48 @@ npm run tauri build   # 构建 release + 平台安装包
 
 跨平台:推荐 GitHub Actions(tauri-apps/tauri-action),三平台矩阵构建。
 
+### 1.1 Linux 文件关联(右键「用 hi-log 打开」)
+
+Linux 与 Windows 机制不同:Windows 由安装器写注册表;Linux 靠 `.desktop` 里的
+**`MimeType=`** 声明 + **`Exec=` 是否带 `%U`**(不带的话右键打开了也收不到文件路径)。
+Tauri 依据 `bundle.fileAssociations` 的 `mimeType` 生成这两项,所以**类型必须写对**:
+
+| 扩展名 | Linux 上的真实 MIME 类型 | 备注 |
+| --- | --- | --- |
+| `.log` | `text/x-log` | shared-mime-info 中 `*.log` 的定义(是 `text/plain` 的子类) |
+| `.txt` | `text/plain` | |
+| `.out` / `.err` | 无标准类型,按内容嗅探为 `text/plain` | 故与 `.txt` 同条目 |
+
+`mimeType` 每个条目只能写一个值,因此拆成两条(`tauri.conf.json` 已如此配置);
+生成的 `MimeType=` 会把各条目拼接成 `text/x-log;text/plain;`。
+
+安装后核对:
+
+```bash
+grep -E '^(Exec|MimeType)=' /usr/share/applications/hi-log.desktop      # deb 安装
+xdg-mime query filetype sample.log    # 期望 text/x-log
+xdg-mime query default text/x-log     # 期望 hi-log.desktop
+```
+
+常见两种失败:
+
+- **`.desktop` 里没有 `MimeType=`**:该 Tauri CLI 版本尚未生成(Linux 关联是后加的能力),
+  或者装的是 **AppImage** —— AppImage 不安装 `.desktop`,需自行集成
+  (AppImageLauncher / appimaged,或手动放一份 `.desktop` 并把 `Exec=` 指向 AppImage 绝对路径)。
+- **`Exec=` 缺 `%U`**:右键能选中,但打开后应用收不到文件路径。
+
+手工补齐(以 deb 为例):
+
+```bash
+sudo sed -i '/^\[Desktop Entry\]/a MimeType=text/x-log;text/plain;' /usr/share/applications/hi-log.desktop
+sudo sed -i 's|^Exec=\(.*\)$|Exec=\1 %U|' /usr/share/applications/hi-log.desktop
+sudo update-desktop-database
+xdg-mime default hi-log.desktop text/x-log     # 可选:直接设为默认
+```
+
+应用侧无需额外改动:GUI 经单实例 IPC 接收命令行文件路径(`ipc::try_forward` → `cli_open`),
+与 `hi-log <file>` 走同一条路。
+
 ## 2. 自动更新(tauri-plugin-updater)
 
 更新链路:应用启动(及每 4 小时)向更新服务器请求 `latest.json`;有新版时提示用户安装。
