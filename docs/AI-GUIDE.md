@@ -25,7 +25,7 @@ MCP 客户端握手后,`initialize` 返回 **instructions** 会引导模型使�
 | `get_lines` | 按行号批量取内容(1-based) |
 | `mark_line` | 打标记:颜色(0-7)+ 备注(GUI 中显示为注释行) |
 | `list_marks` | 列出指定文件的全部标记 |
-| `pin_line` | 固定书签:分组 + 名称 |
+| `pin_line` | 固定书签:行号 + 可选名称(一行只能固定一次,重复调用更新名称) |
 | `list_pins` | 列出指定文件的全部固定 |
 
 ## 多文件

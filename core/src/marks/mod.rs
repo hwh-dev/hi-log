@@ -339,71 +339,18 @@ impl MarkStore {
         Ok(PinList { groups, pins })
     }
 
-    /// 新建分组(同名已存在则返回现有);新分组追加到尾部(position = MAX+1)。
-    pub fn create_pin_group(&self, file_id: &str, name: &str) -> rusqlite::Result<PinGroup> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR IGNORE INTO pin_groups (file_id, name, position)
-             SELECT ?1, ?2, COALESCE(MAX(position), -1) + 1 FROM pin_groups WHERE file_id = ?1",
-            params![file_id, name],
-        )?;
-        conn.query_row(
-            "SELECT id, name FROM pin_groups WHERE file_id = ?1 AND name = ?2",
-            params![file_id, name],
-            |r| Ok(PinGroup { id: r.get(0)?, name: r.get(1)? }),
-        )
-    }
-
-    /// 删除分组:组内固定移到默认组(不丢失数据)。
-    pub fn delete_pin_group(&self, file_id: &str, group_id: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let def = Self::ensure_default_group_locked(&conn, file_id)?;
-        if group_id != def {
-            conn.execute(
-                "UPDATE pins SET group_id = ?1 WHERE group_id = ?2",
-                params![def, group_id],
-            )?;
-        }
-        conn.execute("DELETE FROM pin_groups WHERE id = ?1", params![group_id])?;
-        Ok(())
-    }
-
-    /// 组内全量重排(拖拽排序后调用):`ids` 的顺序即新 position(0..n)。
-    pub fn reorder_pins(&self, file_id: &str, group_id: i64, ids: &[i64]) -> rusqlite::Result<()> {
+    /// 全量重排(侧栏拖拽排序后调用):`ids` 的顺序即新 position(0..n)。
+    ///
+    /// 不带分组参数:分组 UI 已撤销,固定全部落在默认组;`group_id` 列与
+    /// `pin_groups` 表仅为兼容历史数据保留(老库里的组名/顺序不再被改写)。
+    pub fn reorder_pins(&self, file_id: &str, ids: &[i64]) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         for (i, id) in ids.iter().enumerate() {
             conn.execute(
-                "UPDATE pins SET position = ?1 WHERE id = ?2 AND file_id = ?3 AND group_id = ?4",
-                params![i as i64, id, file_id, group_id],
-            )?;
-        }
-        Ok(())
-    }
-
-    /// 分组全量重排(拖拽分组顺序后调用):`ids` 的顺序即新 position(0..n)。
-    pub fn reorder_pin_groups(&self, file_id: &str, ids: &[i64]) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        for (i, id) in ids.iter().enumerate() {
-            conn.execute(
-                "UPDATE pin_groups SET position = ?1 WHERE id = ?2 AND file_id = ?3",
+                "UPDATE pins SET position = ?1 WHERE id = ?2 AND file_id = ?3",
                 params![i as i64, id, file_id],
             )?;
         }
-        Ok(())
-    }
-
-    /// 把固定移到另一分组末尾(跨组拖拽)。
-    pub fn move_pin_to_group(&self, pin_id: i64, file_id: &str, group_id: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let pos: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM pins WHERE file_id = ?1 AND group_id = ?2",
-            params![file_id, group_id],
-            |r| r.get(0),
-        )?;
-        conn.execute(
-            "UPDATE pins SET group_id = ?1, position = ?2 WHERE id = ?3",
-            params![group_id, pos, pin_id],
-        )?;
         Ok(())
     }
 
@@ -596,48 +543,38 @@ mod tests {
     }
 
     #[test]
-    fn pin_groups_create_move_delete() {
-        let s = store();
-        // 先固定一行到默认组(触发"默认"组创建)
-        s.add_pin("a.log", 1, None, "").unwrap();
-        let g = s.create_pin_group("a.log", "崩溃栈").unwrap();
-        let p = s.add_pin("a.log", 55, Some(g.id), "").unwrap();
-        assert_eq!(p.group_id, Some(g.id));
-
-        // 跨组移动:回到默认组
-        let def = s.list_pins("a.log").unwrap().groups
-            .iter().find(|x| x.name == DEFAULT_PIN_GROUP).unwrap().id;
-        s.move_pin_to_group(p.id, "a.log", def).unwrap();
-        let moved = s.pin_by_line("a.log", 55).unwrap().unwrap();
-        assert_eq!(moved.group_id, Some(def));
-
-        // 删除分组:组内固定落回默认组
-        let g2 = s.create_pin_group("a.log", "临时").unwrap();
-        s.add_pin("a.log", 77, Some(g2.id), "").unwrap();
-        s.delete_pin_group("a.log", g2.id).unwrap();
-        let all = s.list_pins("a.log").unwrap();
-        assert!(!all.groups.iter().any(|x| x.id == g2.id));
-        assert!(all.pins.iter().any(|x| x.line_no == 77));
-    }
-
-    #[test]
     fn pin_reorder_and_duplicate_line() {
         let s = store();
-        let g = s.create_pin_group("a.log", "G").unwrap();
-        let p1 = s.add_pin("a.log", 1, Some(g.id), "").unwrap();
-        let p2 = s.add_pin("a.log", 2, Some(g.id), "").unwrap();
-        let p3 = s.add_pin("a.log", 3, Some(g.id), "").unwrap();
+        let p1 = s.add_pin("a.log", 1, None, "").unwrap();
+        let p2 = s.add_pin("a.log", 2, None, "").unwrap();
+        let p3 = s.add_pin("a.log", 3, None, "").unwrap();
 
-        // 拖拽排序:3 挪到最前
-        s.reorder_pins("a.log", g.id, &[p3.id, p1.id, p2.id]).unwrap();
+        // 拖拽排序:3 挪到最前(不带分组参数 —— 分组 UI 已撤销)
+        s.reorder_pins("a.log", &[p3.id, p1.id, p2.id]).unwrap();
         let pins = s.list_pins("a.log").unwrap().pins;
         let lines: Vec<usize> = pins.iter().map(|p| p.line_no).collect();
         assert_eq!(lines, vec![3, 1, 2]);
+        assert_eq!(pins[0].position, 0);
+        assert_eq!(pins[1].position, 1);
 
-        // 同一行重复固定:不新增,改为最新分组
+        // 同一行重复固定:不新增
         let p3b = s.add_pin("a.log", 3, None, "").unwrap();
         assert_eq!(p3b.id, p3.id);
         assert_eq!(s.list_pins("a.log").unwrap().pins.len(), 3);
+    }
+
+    /// 重排只影响指定文件:`file_id` 必须一起参与 WHERE,否则会误改别的文件
+    #[test]
+    fn reorder_pins_is_scoped_to_file() {
+        let s = store();
+        let a1 = s.add_pin("a.log", 1, None, "").unwrap();
+        let a2 = s.add_pin("a.log", 2, None, "").unwrap();
+        let b1 = s.add_pin("b.log", 1, None, "").unwrap();
+
+        s.reorder_pins("a.log", &[a2.id, a1.id]).unwrap();
+        assert_eq!(s.pin_by_line("b.log", 1).unwrap().unwrap().id, b1.id);
+        let b = s.list_pins("b.log").unwrap().pins;
+        assert_eq!(b[0].position, 0, "b.log 的 position 不应被 a.log 的重排改动");
     }
 
     #[test]
@@ -661,10 +598,27 @@ mod tests {
     fn clear_file_clears_pins_too() {
         let s = store();
         s.add_pin("a.log", 9, None, "").unwrap();
-        s.create_pin_group("a.log", "G").unwrap();
         s.clear_file("a.log").unwrap();
         let all = s.list_pins("a.log").unwrap();
         assert!(all.pins.is_empty());
         assert!(all.groups.is_empty());
+    }
+
+    /// 部分标记的 col/len 是 **UTF-8 字节偏移**(不是字符偏移),与搜索命中共用
+    /// 同一套坐标系;前端负责换算成 UTF-16 码元下标再切片。这条把语义钉死。
+    #[test]
+    fn add_range_partial_roundtrip() {
+        let s = store();
+        let m = s.add_range("a.log", 7, 2, "", Some(12), Some(6)).unwrap();
+        assert_eq!(m.col, Some(12));
+        assert_eq!(m.len, Some(6));
+        let back = s.by_line("a.log", 7).unwrap().unwrap();
+        assert_eq!(back.col, Some(12));
+        assert_eq!(back.len, Some(6));
+
+        // 整行标记:col/len 都是 None
+        let whole = s.add("a.log", 8, 3, "").unwrap();
+        assert_eq!(whole.col, None);
+        assert_eq!(whole.len, None);
     }
 }

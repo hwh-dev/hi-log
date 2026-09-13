@@ -43,8 +43,14 @@ pub fn app_data_dir() -> std::path::PathBuf {
     dir.join(ident)
 }
 
-/// MCP 标记数据库路径(与 GUI 同源);CLI 导出复用
+/// MCP 标记数据库路径(与 GUI 同源);CLI 导出复用。
+/// `HI_LOG_DB` 可覆盖(非 GUI 场景指向其它库/测试用隔离库)。
 pub fn marks_db_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("HI_LOG_DB") {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
     app_data_dir().join("hi-log.db")
 }
 
@@ -53,17 +59,18 @@ struct McpState {
     docs: HashMap<String, Arc<Document>>,
     current: Option<String>,
     store: Option<MarkStore>,
+    /// 标记库路径覆盖(测试注入临时目录,避免写进用户真实库);None = 用 marks_db_path()
+    db_path: Option<std::path::PathBuf>,
 }
 
 impl McpState {
     fn store(&mut self) -> Result<&MarkStore, String> {
         if self.store.is_none() {
-            if let Some(dir) = app_data_dir().parent() {
+            let path = self.db_path.clone().unwrap_or_else(marks_db_path);
+            if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            self.store = Some(
-                MarkStore::open(marks_db_path()).map_err(|e| format!("marks db: {e}"))?,
-            );
+            self.store = Some(MarkStore::open(&path).map_err(|e| format!("marks db: {e}"))?);
         }
         Ok(self.store.as_ref().unwrap())
     }
@@ -155,11 +162,10 @@ fn tool_defs() -> Value {
         },
         {
             "name": "pin_line",
-            "description": "固定指定文件的某行(书签)到分组并可命名;一行只能固定一次",
+            "description": "固定指定文件的某行(书签)并可命名;一行只能固定一次,重复调用更新名称",
             "inputSchema": { "type": "object", "properties": {
                 "line_no": { "type": "integer", "description": "1-based 行号" },
                 "file_id": { "type": "string", "description": "open_file 返回的文件路径;缺省=最近打开" },
-                "group": { "type": "string", "description": "分组名(缺省进'默认'组,自动创建)" },
                 "name": { "type": "string", "description": "固定名称(可空)" }
             }, "required": ["line_no"] }
         },
@@ -308,18 +314,14 @@ fn call_tool(state: &mut McpState, name: &str, args: &Value) -> Result<String, S
             if line_no == 0 {
                 return Err("line_no required".into());
             }
-            let store = state.store()?;
-            let group = s("group");
-            let gid = if group.is_empty() {
-                None
-            } else {
-                Some(store.create_pin_group(&file_id, &group).map_err(|e| e.to_string())?.id)
-            };
-            let pin = store
-                .add_pin(&file_id, line_no, gid, &s("name"))
+            // 分组已废弃:固定统一落默认组。以前 AI 传 group 会新建一个 GUI 里
+            // 根本看不到的组,人和机器对不上账。
+            let pin = state
+                .store()?
+                .add_pin(&file_id, line_no, None, &s("name"))
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_string_pretty(&json!({
-                "id": pin.id, "line_no": pin.line_no, "group_id": pin.group_id, "name": pin.name
+                "id": pin.id, "line_no": pin.line_no, "name": pin.name
             }))
             .unwrap())
         }
@@ -343,6 +345,7 @@ pub fn serve() {
         docs: HashMap::new(),
         current: None,
         store: None,
+        db_path: None,
     };
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -370,7 +373,19 @@ mod tests {
     }
 
     fn empty_state() -> McpState {
-        McpState { docs: HashMap::new(), current: None, store: None }
+        McpState { docs: HashMap::new(), current: None, store: None, db_path: None }
+    }
+
+    /// 会写标记库的测试必须用这个:把库指向临时目录。
+    /// (以前 store 为 None 时会打开用户真实库 %APPDATA%/dev.hilog.app/hi-log.db,
+    ///   每次 cargo test 都往里塞 .tmp* 路径的垃圾标记)
+    fn temp_state(dir: &std::path::Path) -> McpState {
+        McpState {
+            docs: HashMap::new(),
+            current: None,
+            store: None,
+            db_path: Some(dir.join("hi-log.db")),
+        }
     }
 
     fn call_text(s: &mut McpState, name: &str, args: Value) -> String {
@@ -442,7 +457,7 @@ mod tests {
         let pb = dir.path().join("b.log");
         std::fs::write(&pa, "alpha beta\ngamma\n").unwrap();
         std::fs::write(&pb, "delta\nalpha delta\n").unwrap();
-        let mut s = empty_state();
+        let mut s = temp_state(dir.path());
 
         call_text(&mut s, "open_file", json!({ "path": pa.to_string_lossy() }));
         call_text(&mut s, "open_file", json!({ "path": pb.to_string_lossy() }));
@@ -472,18 +487,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("b.log");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
-        let mut s = empty_state();
+        let mut s = temp_state(dir.path());
         call_text(&mut s, "open_file", json!({ "path": path.to_string_lossy() }));
 
         let text = call_text(&mut s, "mark_line", json!({ "line_no": 2, "color": 6, "note": "关键" }));
         assert!(text.contains("\"line_no\": 2"));
 
-        let text = call_text(&mut s, "pin_line", json!({ "line_no": 3, "group": "崩溃", "name": "第三行" }));
+        let text = call_text(&mut s, "pin_line", json!({ "line_no": 3, "name": "第三行" }));
         assert!(text.contains("\"name\": \"第三行\""));
 
         let t = call_text(&mut s, "list_marks", json!({}));
         assert!(t.contains("关键"));
         let t = call_text(&mut s, "list_pins", json!({}));
-        assert!(t.contains("崩溃"));
+        assert!(t.contains("第三行"));
     }
 }
