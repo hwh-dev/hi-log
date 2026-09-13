@@ -49,6 +49,12 @@ export interface LogViewHandle {
 
 const BUFFER = 10; // extra rows above/below viewport
 const NOTE_H = 16;
+/** 行高索引重建的防抖:宽度/字号稳定这么久之后才开建 */
+const BUILD_DEBOUNCE_MS = 300;
+/** Ctrl+滚轮缩放手势的静默窗口:窗口内不动索引(重建一次 1-3s/366 万行,实测) */
+const ZOOM_SETTLE_MS = 350;
+/** 缩放步进阈值:滚轮事件累积到这个位移才走一步(一次滚轮手势会发几十个事件) */
+const ZOOM_STEP_PX = 40;
 /** 行高索引成本:内存 = 2×lineCount×4B(wraps+prefix 两个 Int32);构建需读全文件文本一次。
     按"内存预算"与"读盘大小"双维度判定,而不是拍脑袋的行数上限:
     超限则回退固定行高(不折行,不重叠,无乱码),只影响长行折行显示。 */
@@ -175,27 +181,29 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
     return () => ro.disconnect();
   }, []);
 
-  // 字号/行高变化瞬间保持视口顶部行不变
-  const prevRowRef = useRef(rowHeight);
-  useEffect(() => {
-    const prev = prevRowRef.current;
-    prevRowRef.current = rowHeight;
-    if (prev === rowHeight || !viewportRef.current) return;
-    const el = viewportRef.current;
-    const lineF = el.scrollTop / prev;
-    el.scrollTop = lineF * rowHeight;
-    setScrollTop(el.scrollTop);
-  }, [rowHeight]);
+  /** 缩放手势静默窗口的截止时刻(performance.now 基准) */
+  const zoomUntilRef = useRef(0);
 
   // Ctrl+滚轮缩放
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
+    let acc = 0;
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
+      // 累积到位才走一步:一次触控板/高频滚轮手势会发几十个事件,逐个改字号
+      // 会让每次设置写入都伴随一次整篇重排
+      acc += e.deltaY;
+      if (Math.abs(acc) < ZOOM_STEP_PX) return;
+      const dir = acc < 0 ? 1 : -1; // 上滚放大
+      acc = 0;
       const fs = getSettings().fontSize;
-      setSetting("fontSize", Math.min(16, Math.max(11, fs + (e.deltaY < 0 ? 1 : -1))));
+      const next = Math.min(16, Math.max(11, fs + dir));
+      if (next === fs) return; // 已到上下限:不写设置,避免空转
+      // 手势期间不重建行高索引:重建一次 1.2-3.6s(366 万行实测),插在中间必卡
+      zoomUntilRef.current = performance.now() + ZOOM_SETTLE_MS;
+      setSetting("fontSize", next);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
@@ -256,6 +264,21 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   /** heightIndex 的镜像:判断"这次构建是首建还是宽度变化后的重算" */
   const hasIndexRef = useRef(false);
   hasIndexRef.current = heightIndex != null;
+
+  /**
+   * 排一轮索引重建:防抖 + 给缩放手势让路。重复调用只保留最后一次 ——
+   * 这是"缩放不丝滑"的关键:重建一次 1.2-3.6s(366 万行),手势中间插一次必卡,
+   * 而且旧代码在构建结束时会**立刻**再排一轮,连续缩放就成了排队等重建。
+   */
+  const scheduleBuild = useCallback(() => {
+    if (buildTimerRef.current !== null) window.clearTimeout(buildTimerRef.current);
+    const zoomLeft = zoomUntilRef.current - performance.now();
+    const delay = Math.max(BUILD_DEBOUNCE_MS, zoomLeft + 60);
+    buildTimerRef.current = window.setTimeout(() => {
+      buildTimerRef.current = null;
+      void doBuildRef.current();
+    }, delay);
+  }, []);
 
   const doBuild = useCallback(async () => {
     // 防重入;新参数由已完成轮次的 key 比对触发重建
@@ -318,10 +341,11 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
     } finally {
       buildingRef.current = false;
       setIndexProgress(null);
-      // 构建期间尺寸/字号/行数已变 → 用最新参数再排一轮
-      if (latestKeyRef.current !== key) void doBuildRef.current();
+      // 构建期间尺寸/字号/行数已变 → 用最新参数再排一轮。
+      // 走 scheduleBuild(防抖 + 让开缩放):连续缩放时不再"构建完立刻接着构建"
+      if (latestKeyRef.current !== key) scheduleBuild();
     }
-  }, [lineCount, measureFetch, measureWraps, availWidth, fontStr, cols, useBackendWraps]);
+  }, [lineCount, measureFetch, measureWraps, availWidth, fontStr, cols, useBackendWraps, scheduleBuild]);
 
   const doBuildRef = useRef(doBuild);
   doBuildRef.current = doBuild;
@@ -355,19 +379,15 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
         builtColsRef.current = 0;
       }
     }
-    // 防抖:宽度/字号变化后 120ms 再启动,避免拖动分隔条触发高频重建
-    if (buildTimerRef.current !== null) window.clearTimeout(buildTimerRef.current);
-    buildTimerRef.current = window.setTimeout(() => {
-      buildTimerRef.current = null;
-      void doBuildRef.current();
-    }, 120);
+    // 防抖:宽度/字号稳定后才启动,避免拖动分隔条/缩放触发高频重建
+    scheduleBuild();
     return () => {
       if (buildTimerRef.current !== null) {
         window.clearTimeout(buildTimerRef.current);
         buildTimerRef.current = null;
       }
     };
-  }, [lineCount, measureFetch, measureWraps, fontStr, availWidth, viewportWidth, fileSize, cols]);
+  }, [lineCount, measureFetch, measureWraps, fontStr, availWidth, viewportWidth, fileSize, cols, scheduleBuild]);
 
   // ── 逻辑坐标(换行精确)与 DOM 坐标(33M clamp)映射 ──
   const offsetOf = useCallback(
@@ -395,6 +415,23 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
     const domMax = Math.max(1, dh - viewportHeight);
     return (s * domMax) / Math.max(1, logicalH - viewportHeight);
   };
+
+  // 字号/行高变化瞬间保持视口顶部行不变。
+  //
+  // 未压缩:DOM 位置就是逻辑位置,行高变大要让 scrollTop 跟着放大,同一行才留在视口顶。
+  // 压缩后(大文件 33M clamp):映射本身已随 logicalH 缩放,同一 DOM 位置自动对应新行高下
+  // 的同一行 —— 再乘一次行高比就成了平方放大。366 万行实测:缩一档会把内容推走约 1.6 万行。
+  const prevRowRef = useRef(rowHeight);
+  useEffect(() => {
+    const prev = prevRowRef.current;
+    prevRowRef.current = rowHeight;
+    const el = viewportRef.current;
+    if (prev === rowHeight || !el) return;
+    const lh = calcLogicalH();
+    if (domH(lh) < lh) return; // 压缩:什么都不做才是"留在原地"
+    el.scrollTop = (el.scrollTop / prev) * rowHeight;
+    setScrollTop(el.scrollTop);
+  }, [rowHeight, calcLogicalH]);
   /** 逻辑滚动 px → 行号(0-based);有索引时二分精确 */
   const lineAt = useCallback(
     (s: number): number => {
@@ -428,10 +465,22 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
         if (!el) return;
         applyCursor(lineNo0);
         const lh = calcLogicalH();
-        const logicalTop = Math.max(
-          0,
-          offsetOf(lineNo0) + countNotesBefore(lineNo0) * NOTE_H - viewportHeight / 3,
-        );
+        // 目标行已在视口里就不动:点一条就在眼前的固定/命中行时,整篇内容从鼠标底下
+        // 移走(强行落到 1/3 处)是"跳转不自然"的来源。光标框 + flash 已有反馈。
+        //
+        // 判定必须用**与渲染同一套**的锚定映射:行块内部是 1:1 布局,只在视口顶锚定
+        // (rowsShift = offsetOf(start) − domToS(scrollTop) + scrollTop),所以某行在屏幕上
+        // 距视口顶的距离 = 逻辑偏移 − domToS(scrollTop)。用 sToDom(...) 比 scrollTop 是
+        // 那套整体压缩映射(0→33M 均匀缩放),大文件下会把屏幕外的行判成"可见"→ 点击没反应。
+        const viewTopLogical = domToS(el.scrollTop, lh);
+        const relTop = offsetOf(lineNo0) - viewTopLogical;
+        const relBottom = offsetOf(lineNo0 + 1) - viewTopLogical;
+        if (relTop >= 0 && relBottom <= el.clientHeight) {
+          flashAt(lineNo0);
+          return;
+        }
+        // offsetOf 已含"上方注释高度",这里不能再加一次(67b58c8 提取 offsetOf 时的重复项)
+        const logicalTop = Math.max(0, offsetOf(lineNo0) - viewportHeight / 3);
         const top = sToDom(logicalTop, lh);
         el.scrollTop = top;
         setScrollTop(top);
@@ -455,7 +504,7 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
         applyCursor(next);
         const lh = calcLogicalH();
         const s = domToS(el.scrollTop, lh);
-        const topL = offsetOf(next) + countNotesBefore(next) * NOTE_H;
+        const topL = offsetOf(next); // 同上:注释高度已含在 offsetOf 里
         if (topL < s) {
           el.scrollTop = sToDom(Math.max(0, topL - rowHeight), lh);
         } else if (topL + rowHeight * 2 > s + viewportHeight) {
@@ -628,11 +677,14 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   // 拆成「布局 top(精确,每 1M px 才变一次)+ transform 余量(每帧变,数值小故 f32 精度足够)」:
   // 单个 33M 量级的 transform 会因 f32 精度(~4px)抖动。
   const logicalH = calcLogicalH();
+  // 行块的局部 y 从**首行的注释(若有)顶部**开始,故要减掉它;offsetOf 已含上方注释高度,
+  // 再加一次会让内容随"滚出视口的备注条数"逐条下移 16px。
+  const startNoteH =
+    showNotes && marks[visibleRange.start + 1]?.note && noteVisible(visibleRange.start + 1)
+      ? NOTE_H
+      : 0;
   const rowsShift =
-    offsetOf(visibleRange.start) +
-    countNotesBefore(visibleRange.start) * NOTE_H -
-    domToS(scrollTop, logicalH) +
-    scrollTop;
+    offsetOf(visibleRange.start) - startNoteH - domToS(scrollTop, logicalH) + scrollTop;
   const rowsBase = Math.floor(rowsShift / ROWS_BASE_UNIT) * ROWS_BASE_UNIT;
   const rowsResidual = rowsShift - rowsBase;
 
