@@ -4,6 +4,7 @@ import {
   loadSearchHistory,
   recordSearchHistory,
   clearSearchHistory,
+  type SearchHistoryEntry,
 } from "../utils/settings";
 
 interface Props {
@@ -76,8 +77,8 @@ export default function SearchBar({
     ? Math.round((progress.scanned / progress.total) * 100)
     : 0;
 
-  // ── 搜索历史(localStorage 持久化,最近在前,去重;仅存查询词)──
-  const [history, setHistory] = useState<string[]>(loadSearchHistory);
+  // ── 搜索历史(localStorage 持久化,最近在前;词 + 当时的选项一起存)──
+  const [history, setHistory] = useState<SearchHistoryEntry[]>(loadSearchHistory);
   const [suggestOpen, setSuggestOpen] = useState(false);
   /** 高亮索引;-1 = 无高亮(输入框保持用户文本) */
   const [hi, setHi] = useState(-1);
@@ -88,22 +89,22 @@ export default function SearchBar({
    * 列表抖动";真实键入退出浏览,列表恢复实时过滤。
    */
   const [browsing, setBrowsing] = useState(false);
-  const browseRef = useRef<string[]>([]);
+  const browseRef = useRef<SearchHistoryEntry[]>([]);
 
-  // 记录一次搜索:新词插入最前,已有词置顶;上限走设置(searchHistoryMax)
-  const recordHistory = (q: string) => {
+  // 记录一次搜索:同词同选项去重置顶;上限走设置(searchHistoryMax)
+  const recordHistory = (q: string, r = regex, cs = caseSensitive) => {
     if (!q.trim()) return;
-    setHistory(recordSearchHistory(q, getSettings().searchHistoryMax));
+    setHistory(recordSearchHistory(q, r, cs, getSettings().searchHistoryMax));
   };
 
   // 实时候选:输入非空 → 前缀匹配优先、其次包含;空输入 → 全部历史
   const filtered = useMemo(() => {
     const ql = query.trim().toLowerCase();
     if (!ql) return history;
-    const prefix: string[] = [];
-    const contains: string[] = [];
+    const prefix: SearchHistoryEntry[] = [];
+    const contains: SearchHistoryEntry[] = [];
     for (const h of history) {
-      const hl = h.toLowerCase();
+      const hl = h.q.toLowerCase();
       if (hl.startsWith(ql)) prefix.push(h);
       else if (hl.includes(ql)) contains.push(h);
     }
@@ -115,7 +116,7 @@ export default function SearchBar({
   const suggest = suggestOpen && list.length > 0;
 
   /** 进入浏览模式并固定当前列表为快照 */
-  const startBrowse = (items: string[]) => {
+  const startBrowse = (items: SearchHistoryEntry[]) => {
     browseRef.current = items;
     setBrowsing(true);
     setSuggestOpen(true);
@@ -131,13 +132,16 @@ export default function SearchBar({
     }
   };
 
-  /** 选中一项:填入 + 记录 + 立即搜索(选项保持当前状态,不复原历史选项) */
-  const pickAndSearch = (q: string) => {
-    setQuery(q);
+  /** 选中一项:连**当时的选项**一起还原(否则 .* 开关与 Aa 状态与历史词不匹配,
+      同一句正则用不同开关搜出来的结果天差地别) */
+  const pickAndSearch = (h: SearchHistoryEntry) => {
+    setQuery(h.q);
+    setRegex(h.regex);
+    setCaseSensitive(h.caseSensitive);
     setSuggestOpen(false);
     setBrowsing(false);
-    recordHistory(q);
-    onApplyQuery(q, regex, caseSensitive);
+    recordHistory(h.q, h.regex, h.caseSensitive);
+    onApplyQuery(h.q, h.regex, h.caseSensitive);
   };
 
   return (
@@ -219,7 +223,7 @@ export default function SearchBar({
           >
             {list.map((h, i) => (
               <div
-                key={h}
+                key={`${h.q}|${h.regex ? 1 : 0}${h.caseSensitive ? 1 : 0}`}
                 className={`suggest-item ${i === hi ? "active" : ""}`}
                 onMouseEnter={() => {
                   // 悬停视作浏览:Enter 才带上该历史词;输入框保持原文
@@ -232,7 +236,12 @@ export default function SearchBar({
                 onMouseDown={() => pickAndSearch(h)}
               >
                 <span className="suggest-q">
-                  <HighlightMatch text={h} match={browsing ? "" : query} />
+                  <HighlightMatch text={h.q} match={browsing ? "" : query} />
+                </span>
+                {/* 历史项的选项旗标:选中时会一并还原,先让用户看见 */}
+                <span className="suggest-flags">
+                  {h.regex ? ".*" : ""}
+                  {h.caseSensitive ? "Aa" : ""}
                 </span>
               </div>
             ))}

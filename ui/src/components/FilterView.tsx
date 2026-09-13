@@ -56,6 +56,8 @@ interface Props {
   /** 在二次命中里前/后跳转(面板 ‹ ›,与 F6/Shift+F6 同语义) */
   onRefinePrev?: () => void;
   onRefineNext?: () => void;
+  /** 把激活会话的命中行导出到文件;缺省不显示按钮 */
+  onExport?: (session: SearchSession) => void;
 }
 
 /** FilterView 对外句柄:Ctrl+F 唤起结果内过滤 */
@@ -117,6 +119,7 @@ const FilterView = forwardRef<FilterViewHandle, Props>(function FilterView(
     refineLines,
     onRefinePrev,
     onRefineNext,
+    onExport,
   },
   ref,
 ) {
@@ -395,6 +398,15 @@ const FilterView = forwardRef<FilterViewHandle, Props>(function FilterView(
           {truncated ? "+" : ""} 命中
           {contextLines > 0 && <span className="ctx-badge">±{contextLines}</span>}
         </span>
+        {onExport && active && (
+          <button
+            className="panel-btn"
+            title={`把「${active.query}」的命中行导出为文本文件`}
+            onClick={() => onExport(active)}
+          >
+            导出
+          </button>
+        )}
         {setRefineQuery && (
           <>
             <button

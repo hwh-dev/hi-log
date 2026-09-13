@@ -93,21 +93,19 @@
 }
 
 /* 面板叶片 blur 清单:只挂叶子表面,绝不挂 .app 或其祖先
-   (.ctx-menu/.modal-overlay/.findbar 是 fixed 后代,挂祖先会打乱层级与定位) */
+   (.ctx-menu/.modal-overlay 是 fixed 后代,挂祖先会打乱层级与定位) */
 :root[data-theme-style="glass"] .titlebar,
 :root[data-theme-style="glass"] .tabbar,
 :root[data-theme-style="glass"] .sidebar,
 :root[data-theme-style="glass"] .searchbar,
 :root[data-theme-style="glass"] .statusbar,
-:root[data-theme-style="glass"] .pins-header,
 :root[data-theme-style="glass"] .filter-header,
 :root[data-theme-style="glass"] .popout-header,
 :root[data-theme-style="glass"] .split-header,
 :root[data-theme-style="glass"] .popout-body.sidebar,
 :root[data-theme-style="glass"] .modal,
 :root[data-theme-style="glass"] .ctx-menu,
-:root[data-theme-style="glass"] .search-suggest,
-:root[data-theme-style="glass"] .findbar {
+:root[data-theme-style="glass"] .search-suggest {
   -webkit-backdrop-filter: var(--panel-blur);
   backdrop-filter: var(--panel-blur);
 }
@@ -352,10 +350,6 @@ button {
   letter-spacing: 0.02em;
   color: var(--text-primary);
   margin-bottom: 10px;
-}
-
-.logo .dot {
-  color: var(--accent);
 }
 
 .hint {
@@ -604,11 +598,6 @@ button {
   cursor: text;
 }
 
-/* 点击折叠:收起为 📝 图标(行高不变,虚拟滚动无需重排) */
-.log-note.note-collapsed {
-  cursor: pointer;
-}
-
 .log-note:hover {
   background: var(--bg-hover);
 }
@@ -702,239 +691,6 @@ button {
   min-height: 0;
 }
 
-/* ── snapshots panel ── */
-
-.snapshots-panel {
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.snapshots-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px 4px;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  color: var(--text-dim);
-}
-
-.snapshot-add {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: var(--accent);
-  padding: 1px 4px;
-}
-
-.snapshot-add:hover {
-  color: var(--accent-hover);
-}
-
-.snapshots-empty {
-  padding: 0 12px 6px;
-  font-size: 10px;
-  color: var(--text-dim);
-}
-
-.snapshot-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 12px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.snapshot-item:hover {
-  background: var(--bg-hover);
-}
-
-.snapshot-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-
-.snapshot-line {
-  color: var(--text-dim);
-  font-size: 10px;
-  flex-shrink: 0;
-}
-
-.snapshot-remove {
-  visibility: hidden;
-  width: 16px;
-  height: 16px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.snapshot-item:hover .snapshot-remove {
-  visibility: visible;
-}
-
-.snapshot-remove:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-/* ── pins panel(固定:书签 + 分组 + 拖拽排序)── */
-
-.pins-panel {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-.pins-header {
-  position: sticky;
-  top: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px 4px;
-  background: var(--bg-titlebar);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--border);
-  z-index: 1;
-}
-
-.pins-new {
-  border: none;
-  background: none;
-  color: var(--accent);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  cursor: pointer;
-  padding: 2px 4px;
-}
-
-.pins-new:hover {
-  color: var(--accent-hover);
-}
-
-.pins-empty {
-  padding: 12px;
-  font-size: 11px;
-  line-height: 1.7;
-  color: var(--text-dim);
-}
-
-.pin-group {
-  padding: 1px 0 4px;
-}
-
-.pin-group-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  color: var(--text-secondary);
-  /* 分组标题:跨组拖拽的放置目标;拖拽排序由 ⠿ 手柄触发 */
-  cursor: default;
-  user-select: none;
-}
-
-/* 分组排序拖拽手柄(唯一拖拽源,避免与折叠/删除点击冲突) */
-.pin-group-drag {
-  cursor: grab;
-  color: var(--text-dim);
-  font-size: 10px;
-  padding: 0 3px;
-  flex-shrink: 0;
-  -webkit-user-drag: element;
-  user-select: none;
-}
-
-.pin-group-drag:hover {
-  color: var(--text-primary);
-}
-
-.pin-group-title.drop-target {
-  outline: 1px dashed var(--accent);
-  outline-offset: -1px;
-}
-
-/* 拖拽中的分组:半透明提示可放置 */
-.pin-group-title.dragging {
-  opacity: 0.45;
-}
-
-/* 折叠/展开箭头:加大命中区,按住拖动分组时优先当作可点按钮 */
-.pin-group-arrow {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 9px;
-  line-height: 1;
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  flex-shrink: 0;
-  border-radius: 3px;
-}
-
-.pin-group-arrow:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.pin-group-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.pin-group-count {
-  color: var(--text-dim);
-  font-weight: 400;
-  margin-left: auto;
-}
-
-.pin-group-del {
-  visibility: hidden;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 1px 4px;
-}
-
-.pin-group:hover .pin-group-del {
-  visibility: visible;
-}
-
-.pin-group-del:hover {
-  color: var(--close-hover);
-}
-
 .pin-item {
   display: flex;
   flex-wrap: wrap;
@@ -954,27 +710,10 @@ button {
   opacity: 0.45;
 }
 
-/* 拖拽中的行:半透明提示可放置 */
-.pin-item.dragging {
-  opacity: 0.45;
-}
-
 .pin-item-no {
   color: var(--accent);
   flex-shrink: 0;
   font-size: 10px;
-}
-
-/* 有名称的固定:名称做主显示,加粗强调;可长名但单行省略,防止压到右侧按钮 */
-.pin-item-no.named {
-  color: var(--text-primary);
-  font-weight: 700;
-  font-size: 11px;
-  white-space: nowrap;
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* 自定义名字:次级标签(行号才是主显示,名字不会冒充行号);长名单行省略 */
@@ -987,14 +726,6 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* 有名称时,行号作为次级徽标(与备注名区分) */
-.pin-item-meta {
-  color: var(--text-dim);
-  font-size: 9px;
-  flex-shrink: 0;
-  margin-left: auto;
 }
 
 .pin-item-rename {
@@ -1306,12 +1037,6 @@ button {
   font-size: 9px;
 }
 
-.suggest-more {
-  padding: 3px 8px;
-  color: var(--text-dim);
-  font-size: 9px;
-}
-
 .suggest-clear {
   margin-top: 2px;
   padding: 3px 8px;
@@ -1612,6 +1337,20 @@ mark {
   flex: 1;
 }
 
+/* 状态提示:文件摘要或错误信息(打开失败/搜索失败都走这里,必须可见且不撑破状态栏) */
+.status-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40vw;
+}
+
+/* 正文行光标位置:等宽数字,跳动时不抖宽度 */
+.status-cursor {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .theme-toggle {
   border: none;
   background: transparent;
@@ -1844,24 +1583,6 @@ mark {
   flex: 1;
 }
 
-.popout-close {
-  padding: 2px 10px;
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 13px;
-  cursor: pointer;
-  line-height: 1.3;
-  /* 关闭按钮不参与拖拽 */
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-
-.popout-close:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
 .popout-body {
   flex: 1;
   display: flex;
@@ -1882,10 +1603,6 @@ mark {
   flex: 1;
   height: 100%;
   border-top: none;
-}
-
-.popout-body .snapshots-panel {
-  flex-shrink: 0;
 }
 
 /* ── modal dialog(输入弹窗,替换原生 prompt,跟随主题)── */
@@ -2186,6 +1903,37 @@ mark {
   text-align: right;
 }
 
+/* 「关于」页:小按钮 + 版本号 + 二次确认 */
+.settings-mini {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.settings-mini:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-mini.danger:hover {
+  color: var(--close-hover);
+  border-color: var(--close-hover);
+}
+
+.settings-confirm {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.settings-version {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
 /* ── filter view:上下文行(±N)── */
 
 .filter-row.ctx .filter-line-no,
@@ -2395,75 +2143,6 @@ mark {
 
 .note-item-del:hover {
   color: var(--close-hover);
-}
-
-/* ── 浮窗快速查找(FindBar,klogg 式):悬浮日志区顶部,不占布局 ── */
-.findbar {
-  position: fixed;
-  top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 200; /* 高于搜索建议(100)/弹窗(1000 以下),低于 modal */
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px 6px;
-  background: var(--bg-titlebar);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  box-shadow: 0 4px 14px rgb(0 0 0 / 35%);
-  font-size: 12px;
-}
-
-.findbar-icon {
-  color: var(--text-dim);
-  font-size: 11px;
-  padding: 0 2px;
-}
-
-.findbar-input {
-  background: transparent;
-  border: none;
-  outline: none;
-  color: var(--text-primary);
-  font-family: var(--mono-font, ui-monospace, "Cascadia Mono", Consolas, monospace);
-  font-size: 12px;
-  width: 220px;
-  padding: 2px 4px;
-}
-
-.findbar-input::placeholder {
-  color: var(--text-dim);
-}
-
-.findbar-count {
-  min-width: 44px;
-  text-align: right;
-  color: var(--text-secondary);
-  font-size: 11px;
-  padding: 0 4px;
-  white-space: nowrap;
-}
-
-.findbar-btn {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 14px;
-  line-height: 1;
-  padding: 1px 6px;
-  cursor: pointer;
-  border-radius: 3px;
-}
-
-.findbar-btn:hover:not(:disabled) {
-  background: var(--bg-active);
-  color: var(--text-primary);
-}
-
-.findbar-btn:disabled {
-  color: var(--text-dim);
-  cursor: default;
 }
 
 /* ── 结果内二次搜索(filter in results):FILTER 面板右上角的"在结果中过滤" ── */

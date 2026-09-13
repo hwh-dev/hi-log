@@ -10,6 +10,7 @@ import {
   setResolvedBackgroundPath,
   getResolvedBackgroundUrl,
   resolveBackgroundImageUrl,
+  resetSettings,
   type AppSettings,
   type ThemeSetting,
   type EncodingSetting,
@@ -30,7 +31,7 @@ interface Props {
   onClose: () => void;
 }
 
-type TabId = "appearance" | "search" | "files" | "layout" | "keys";
+type TabId = "appearance" | "search" | "files" | "layout" | "keys" | "about";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "appearance", label: "外观" },
@@ -38,6 +39,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "files", label: "文件" },
   { id: "layout", label: "布局" },
   { id: "keys", label: "快捷键" },
+  { id: "about", label: "关于" },
 ];
 
 const THEME_OPTIONS: { v: ThemeSetting; label: string }[] = [
@@ -239,6 +241,84 @@ function KeyBindingsTab() {
   );
 }
 
+interface AppInfo {
+  version: string;
+  data_dir: string;
+  db_path: string;
+  log_path: string;
+}
+
+/** 关于:版本 + 关键路径(排障时要的第一手信息)+ 恢复默认设置 */
+function AboutTab() {
+  const [info, setInfo] = useState<AppInfo | null>(null);
+  const [copied, setCopied] = useState("");
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  useEffect(() => {
+    void invoke<AppInfo>("app_info")
+      .then(setInfo)
+      .catch(() => setInfo(null));
+  }, []);
+
+  const copy = (label: string, text: string) => {
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(label);
+        window.setTimeout(() => setCopied(""), 1200);
+      })
+      .catch(() => {});
+  };
+
+  const pathRow = (label: string, value: string) => (
+    <Row label={label} desc={value}>
+      <button className="settings-mini" onClick={() => copy(label, value)}>
+        {copied === label ? "已复制" : "复制"}
+      </button>
+    </Row>
+  );
+
+  return (
+    <div className="settings-body">
+      <Row label="版本" desc="hi-log — 跨平台高性能日志查看 / 检索工具">
+        <span className="settings-version">{info?.version ?? "…"}</span>
+      </Row>
+      {info && (
+        <>
+          {pathRow("数据库", info.db_path)}
+          {pathRow("运行日志", info.log_path)}
+          {pathRow("数据目录", info.data_dir)}
+        </>
+      )}
+      <Row
+        label="恢复默认设置"
+        desc="清空全部设置项(localStorage)。标记、固定与备注存在数据库里,不受影响"
+      >
+        {confirmReset ? (
+          <span className="settings-confirm">
+            <button
+              className="settings-mini danger"
+              onClick={() => {
+                resetSettings();
+                setConfirmReset(false);
+              }}
+            >
+              确认恢复
+            </button>
+            <button className="settings-mini" onClick={() => setConfirmReset(false)}>
+              取消
+            </button>
+          </span>
+        ) : (
+          <button className="settings-mini" onClick={() => setConfirmReset(true)}>
+            恢复默认
+          </button>
+        )}
+      </Row>
+    </div>
+  );
+}
+
 /**
  * 设置弹窗(标题栏 ⚙ 打开):页签式,改动即生效并跨窗口广播(popout 实时跟随)。
  * Esc / 点击遮罩关闭(与 PromptModal 同模式)。
@@ -416,6 +496,8 @@ export default function SettingsModal({ onClose }: Props) {
         )}
 
         {tab === "keys" && <KeyBindingsTab />}
+
+        {tab === "about" && <AboutTab />}
       </div>
     </div>
   );

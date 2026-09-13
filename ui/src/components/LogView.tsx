@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useCallback, useMemo, forwardRef, useImperativeHandle, memo } from "react";
-import { highlightText } from "../utils/highlight";
+import { highlightText, byteToCharTables, byteRangeToChars } from "../utils/highlight";
 import { measureLines, fontCharWidth } from "../utils/measure";
 import { dbg } from "../utils/log";
 import { paletteColor, type Mark } from "../utils/palette";
@@ -33,6 +33,8 @@ interface Props {
   globalCollapsed: boolean;
   /** 右键备注注释行(复制/编辑/删除菜单) */
   onNoteContextMenu: (lineNo: number, x: number, y: number) => void;
+  /** 行光标移动(0-based)时上报,供状态栏显示 */
+  onCursorLine?: (line0: number) => void;
 }
 
 export interface LogViewHandle {
@@ -67,9 +69,10 @@ interface HeightIndex {
   lineCount: number;
 }
 
+/** 部分标记:col/len 是 **UTF-8 字节偏移**(与搜索命中同一坐标系),
+    必须先换算成 UTF-16 码元下标再 slice,否则含 CJK/emoji 的行会切错位置 */
 function markRangeText(text: string, col: number, len: number, color: string): React.ReactNode {
-  const s = Math.max(0, col);
-  const e = Math.min(text.length, col + Math.max(0, len));
+  const [s, e] = byteRangeToChars(byteToCharTables(text), col, col + Math.max(0, len));
   if (e <= s) return text;
   return (
     <>
@@ -83,7 +86,7 @@ function markRangeText(text: string, col: number, len: number, color: string): R
 }
 
 const LogView = forwardRef<LogViewHandle, Props>(function LogView(
-  { lineCount, fileSize, lineCache, highlightMap, marks, pins, followTail, onContextMenu, fetchLines, measureFetch, measureWraps, showNotes, globalCollapsed, onNoteContextMenu, activeHitLine }: Props,
+  { lineCount, fileSize, lineCache, highlightMap, marks, pins, followTail, onContextMenu, fetchLines, measureFetch, measureWraps, showNotes, globalCollapsed, onNoteContextMenu, activeHitLine, onCursorLine }: Props,
   ref,
 ) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -94,6 +97,7 @@ const LogView = forwardRef<LogViewHandle, Props>(function LogView(
   const applyCursor = (n0: number) => {
     cursorLineRef.current = n0;
     setCursorLine(n0);
+    onCursorLine?.(n0); // 上报给状态栏显示
   };
   useEffect(() => {
     setCursorLine((c) => Math.max(0, Math.min(c, lineCount - 1)));

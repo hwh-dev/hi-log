@@ -2,13 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import LogView, { LogViewHandle } from "./components/LogView";
 import SearchBar from "./components/SearchBar";
 import FilterView, { type FilterViewHandle } from "./components/FilterView";
 import Welcome from "./components/Welcome";
-import PinsPanel, { type Pin, type PinGroup } from "./components/PinsPanel";
+import type { Pin, PinGroup } from "./utils/types";
 import PinsAggregate, { type FilePinsBlock } from "./components/PinsAggregate";
 import NotesPanel, { type FileNotesBlock } from "./components/NotesPanel";
 import ContextMenu from "./components/ContextMenu";
@@ -125,12 +125,53 @@ function readSelection(text: string | undefined): { selCol?: number; selLen?: nu
   if (a != null && b != null && a !== b) {
     return { lineStart: Math.min(a, b), lineEnd: Math.max(a, b), selText: t };
   }
-  // 单行:在行文本里定位选中串(近似:首次出现)
+  // 单行:量出选区在行文本内的真实偏移 —— 不能用 text.indexOf(t)(只取首次出现,
+  // 同行有重复子串时会标错位置),改用 DOM Range 数出选区前后的字符数。
   if (a != null && text) {
+    const precise = selectionByteOffsets(r, text);
+    if (precise) return { selCol: precise.col, selLen: precise.len, selText: t };
     const idx = text.indexOf(t);
-    if (idx >= 0) return { selCol: idx, selLen: t.length, selText: t };
+    if (idx >= 0) {
+      // 兜底:拿不到精确 Range(选区跨了行号列等)时退回首次出现,并按字节计
+      const enc = new TextEncoder();
+      return {
+        selCol: enc.encode(text.slice(0, idx)).length,
+        selLen: enc.encode(t).length,
+        selText: t,
+      };
+    }
   }
   return {};
+}
+
+/** 选区在单行文本内的字节偏移:DOM Range 量字符偏移 → 再换算成 UTF-8 字节
+    (col/len 存库与搜索命中共用同一套字节坐标系) */
+function selectionByteOffsets(
+  range: Range,
+  text: string,
+): { col: number; len: number } | null {
+  const node = range.startContainer;
+  const el = (node instanceof Element ? node : node.parentElement)?.closest(".log-line");
+  const lineTextEl = el?.querySelector<HTMLElement>(".line-text") ?? null;
+  if (!lineTextEl) return null;
+  if (!lineTextEl.contains(range.startContainer) || !lineTextEl.contains(range.endContainer)) {
+    return null;
+  }
+  // 从行首量到指定位置:Range.toString() 只取文本,<mark>/<span> 不贡献字符
+  const offsetOf = (c: Node, o: number): number => {
+    const r = document.createRange();
+    r.setStart(lineTextEl, 0);
+    r.setEnd(c, o);
+    return r.toString().length;
+  };
+  const s = offsetOf(range.startContainer, range.startOffset);
+  const e = offsetOf(range.endContainer, range.endOffset);
+  if (!(e > s)) return null;
+  const enc = new TextEncoder();
+  return {
+    col: enc.encode(text.slice(0, s)).length,
+    len: enc.encode(text.slice(s, e)).length,
+  };
 }
 
 const appWindow = getCurrentWindow();
@@ -161,6 +202,10 @@ export default function App() {
   // 派生别名(渲染代码沿用原变量名,无需逐处改)
   const fileMeta = file?.meta ?? null;
   const filePath = file?.path ?? "";
+  /** 文件摘要由 meta 派生而非存进 statusText —— 否则切 tab 后状态栏还显示上一个文件的行数/大小 */
+  const fileSummary = fileMeta
+    ? `${fileMeta.lines.toLocaleString()} lines · ${(fileMeta.size / 1024 / 1024).toFixed(1)} MB · ${fileMeta.encoding}`
+    : "";
   const lineCache = file?.lineCache ?? {};
   const sessions = file?.sessions ?? [];
   const activeId = file?.searchActiveId ?? null;
@@ -201,6 +246,15 @@ export default function App() {
       用 F6 / 搜索框 ‹› 在正文里继续翻找时,面板光标留在你刚才看的那条结果上,
       不会因为你移动了正文就丢失"刚看到哪条"的参照。 */
   const [filterHitLine, setFilterHitLine] = useState<number | null>(null);
+  /** 正文行光标(0-based,-1 = 未定位),仅用于状态栏显示;切文件时复位 */
+  const [cursorLine, setCursorLine] = useState(-1);
+  // 切文件时两个命中光标都要清掉:它们指向的是上一个文件的命中行,
+  // 留着会在新文件的同一行号上画出无意义的光标条。
+  useEffect(() => {
+    setActiveHitLine(null);
+    setFilterHitLine(null);
+    setCursorLine(-1);
+  }, [activeFileId]);
   const searchIdRef = useRef<number | null>(null);
   /** tail 重搜的被替换会话 id(search_done 后并入并删除新会话) */
   const tailReplaceRef = useRef<number | null>(null);
@@ -410,6 +464,7 @@ export default function App() {
         return;
       }
       setActiveFileId(fileId);
+      setStatusText("");
       pendingJumpRef.current = { fileId, line0 };
     },
     [activeFileId, splitFileId],
@@ -663,11 +718,9 @@ export default function App() {
   }, []);
 
   /** 手动拖拽重排:ids 为新顺序。UI 已撤销分组,固定全部在默认组,取首个 pin 的组 id */
+  /** 拖拽重排:ids 的顺序即新顺序。不再需要猜 group_id(分组已废弃) */
   const reorderPinsAction = useCallback((fileId: string, ids: number[]) => {
-    const f = filesRef.current[fileId];
-    const gid = f?.pins.find((p) => p.group_id != null)?.group_id ?? null;
-    if (gid == null) return;
-    void invoke("reorder_pins", { fileId, groupId: gid, ids }).catch((e) =>
+    void invoke("reorder_pins", { fileId, ids }).catch((e) =>
       console.error("reorder_pins failed", e),
     );
   }, []);
@@ -713,9 +766,7 @@ export default function App() {
         setWelcomeVisible(false);
         void loadMarks(target);
         void loadPins(target);
-        setStatusText(
-          `${meta.lines.toLocaleString()} lines · ${(meta.size / 1024 / 1024).toFixed(1)} MB · ${meta.encoding}`,
-        );
+        setStatusText(""); // 清掉 "Opening…",摘要由 fileSummary 派生显示
         saveLastFile(target);
         setRecentFiles(recordRecentFile(target));
         // 设置项"打开时自动进入 tail"
@@ -756,26 +807,6 @@ export default function App() {
     }, 3000);
     return () => window.clearTimeout(t);
   }, []);
-
-  const resetSearch = useCallback(() => {
-    if (flushTimerRef.current !== null) {
-      clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
-    pendingHitsRef.current = [];
-    pendingLineCacheRef.current = {};
-    pendingProgressRef.current = null;
-    // 停止仍在跑的后端扫描,避免清空后白扫整个文件
-    if (searchIdRef.current !== null) {
-      void invoke("stop_search", { searchId: searchIdRef.current }).catch(() => {});
-    }
-    if (activeFileId) {
-      mutateFile(activeFileId, (cur) => ({ ...cur, sessions: [], searchActiveId: null }));
-    }
-    runningRef.current = false;
-    searchIdRef.current = null;
-    searchFileRef.current = null;
-  }, [activeFileId, mutateFile]);
 
   // 把缓冲中的命中一次性合并进对应会话(搜索结束后立即落盘)
   const flushHits = useCallback(() => {
@@ -1069,10 +1100,12 @@ export default function App() {
         }
       } catch (e) {
         runningRef.current = false;
+        // 以前只 console.error:文件未打开/正则非法时用户只看到"点了搜索没反应"
+        setStatusText(`搜索启动失败:${e}`);
         console.error("start_search failed", e);
       }
     },
-    [focusFileId, resetSearch, mutateSearchSessions, setSearchActiveId],
+    [focusFileId, mutateSearchSessions, setSearchActiveId],
   );
 
   // 手动触发搜索:回车或点按钮(不做打字即搜)
@@ -1224,6 +1257,9 @@ export default function App() {
         setCaseSensitive(target.caseSensitive);
       }
       mutateFile(fid, (cur) => ({ ...cur, searchActiveId: id }));
+      // 换会话 = 换结果集,两个光标都指向旧结果集的行,一并清掉
+      setActiveHitLine(null);
+      setFilterHitLine(null);
       if (popoutOpenRef.current.filter) {
         void appWindow.emitTo("filter-popout", "session_active_fwd", { search_id: id }).catch(() => {});
       }
@@ -1267,6 +1303,8 @@ export default function App() {
     mutateFile(fid, (cur) => ({ ...cur, sessions: [], searchActiveId: null }));
     searchIdRef.current = null;
     runningRef.current = false;
+    setActiveHitLine(null);
+    setFilterHitLine(null);
     if (popoutOpenRef.current.filter) {
       void appWindow.emitTo("filter-popout", "sessions_clear_fwd", {}).catch(() => {});
     }
@@ -1423,8 +1461,8 @@ export default function App() {
           setDropActive(false);
         } else if (t === "drop") {
           setDropActive(false);
-          const p = event.payload.paths[0];
-          if (p) openFile(p);
+          // 拖入多个文件时全部打开(以前只取第一个,其余静默丢弃)
+          for (const p of event.payload.paths ?? []) void openFile(p);
         }
       })
       .then((fn) => {
@@ -1615,6 +1653,40 @@ export default function App() {
     runningRef.current = false;
   }, []);
 
+  /** 导出激活会话的命中行到文本文件:后端重扫(前端缓存只有看过的行,导出必然残缺) */
+  const exportHitsAction = useCallback(
+    async (s: SearchSession) => {
+      const fid = focusFileId;
+      if (!fid) return;
+      const base = (fid.split(/[/\\]/).pop() ?? "hits").replace(/\.[^.]+$/, "");
+      let dest: string | null = null;
+      try {
+        dest = await save({
+          defaultPath: `${base}-hits.txt`,
+          filters: [{ name: "文本", extensions: ["txt", "log"] }],
+        });
+      } catch {
+        return; // 用户取消或对话框不可用
+      }
+      if (!dest) return;
+      setStatusText("导出中…");
+      try {
+        const n = await invoke<number>("export_hits", {
+          fileId: fid,
+          query: s.query,
+          opts: { regex: s.regex, caseSensitive: s.caseSensitive },
+          path: dest,
+          context: getSettings().contextLines,
+        });
+        setStatusText(`已导出 ${n.toLocaleString()} 条命中 → ${dest}`);
+      } catch (e) {
+        setStatusText(`导出失败:${e}`);
+        console.error("export_hits failed", e);
+      }
+    },
+    [focusFileId],
+  );
+
   // FilterView 稳定回调(memo 化命中面板需要,避免内联箭头致 memo 失效)
   /** 点命中面板某条结果:正文滚过去,并把**两处光标**都设到这条
       (这是显式"去看这条",两处应当一致;而正文里 F6/‹› 翻找时只动正文光标) */
@@ -1673,10 +1745,18 @@ export default function App() {
               onClick={() => {
                 setActiveFileId(f.meta.id);
                 setWelcomeVisible(false);
+                setStatusText(""); // 清掉上一个文件的提示(如 Error),摘要随 meta 重新派生
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setTabCtx({ fileId: f.meta.id, x: e.clientX, y: e.clientY });
+              }}
+              onAuxClick={(e) => {
+                // 中键关闭(浏览器/编辑器通例)
+                if (e.button === 1) {
+                  e.preventDefault();
+                  closeFile(f.meta.id);
+                }
               }}
             >
               <span className="tab-name">{f.path.split(/[/\\]/).pop()}</span>
@@ -1808,6 +1888,7 @@ export default function App() {
                 measureFetch={measureFetch}
                 measureWraps={measureWraps}
                 activeHitLine={focusPane === "main" ? activeHitLine : null}
+                onCursorLine={setCursorLine}
               />
               {splitFileId && splitFile && (
                 <>
@@ -1891,6 +1972,7 @@ export default function App() {
                 ref={filterViewRef}
                 onRefinePrev={filterRefinePrev}
                 onRefineNext={filterRefineNext}
+                onExport={exportHitsAction}
               />
             </>
           )}
@@ -1965,6 +2047,10 @@ export default function App() {
                   }
                 : undefined
             }
+            onCopyLine={() => {
+              copyText(ctxFile?.lineCache[ctxMenu.lineNo] ?? "");
+              setCtxMenu(null);
+            }}
             onNote={() => void addNoteAction(ctxMenu.fileId, ctxMenu.lineNo, ctxMark?.color ?? 0)}
             onClear={() => {
               if (ctxMark) void removeMarkAction(ctxMark.id);
@@ -2062,6 +2148,28 @@ export default function App() {
               拆分编辑器{tabCtx.fileId === splitFileId ? "(已在右栏)" : ""}
             </button>
             <button
+              className="ctx-item"
+              onClick={() => {
+                copyText(tabCtx.fileId);
+                setTabCtx(null);
+              }}
+            >
+              复制文件路径
+            </button>
+            <button
+              className="ctx-item"
+              onClick={() => {
+                // 关闭除当前 tab 外的全部;欢迎页 tab 不动
+                for (const id of Object.keys(filesRef.current)) {
+                  if (id !== tabCtx.fileId) closeFile(id);
+                }
+                setActiveFileId(tabCtx.fileId);
+                setTabCtx(null);
+              }}
+            >
+              关闭其他
+            </button>
+            <button
               className="ctx-item danger"
               onClick={() => {
                 closeFile(tabCtx.fileId);
@@ -2069,6 +2177,18 @@ export default function App() {
               }}
             >
               关闭
+            </button>
+            <button
+              className="ctx-item danger"
+              onClick={() => {
+                for (const id of Object.keys(filesRef.current)) closeFile(id);
+                // closeFile 逐个切换 active 时会读到过期的 files,兜底显式置空回到欢迎页
+                setActiveFileId(null);
+                setWelcomeVisible(true);
+                setTabCtx(null);
+              }}
+            >
+              全部关闭
             </button>
           </div>
         </div>
@@ -2099,12 +2219,19 @@ export default function App() {
         />
       )}
 
-      {fileMeta && (
-        <div className="statusbar">
-          <span className="status-file" title={filePath}>{filePath}</span>
-          <span className="status-spacer" />
-          <span>{statusText}</span>
-          {hitCount > 0 && <span className="status-hits">{hitCount.toLocaleString()} hits</span>}
+      {/* 状态栏常驻:以前被 fileMeta 门控,导致"打开失败/搜索失败"写进 statusText 后
+          整块不渲染,错误被彻底吞掉,用户只看到"点了没反应"。 */}
+      <div className="statusbar">
+        <span className="status-file" title={filePath}>{filePath}</span>
+        <span className="status-spacer" />
+        <span className="status-msg">{statusText || fileSummary}</span>
+        {cursorLine >= 0 && fileMeta && (
+          <span className="status-cursor" title="正文行光标(↑↓ 移动)">
+            L{(cursorLine + 1).toLocaleString()} / {fileMeta.lines.toLocaleString()}
+          </span>
+        )}
+        {hitCount > 0 && <span className="status-hits">{hitCount.toLocaleString()} hits</span>}
+        {fileMeta && (
           <button
             className={`theme-toggle ${tailMode ? "active" : ""}`}
             onClick={() => setTailMode((t) => !t)}
@@ -2112,6 +2239,8 @@ export default function App() {
           >
             TAIL
           </button>
+        )}
+        {fileMeta && (
           <button
             className={`theme-toggle ${globalCollapsed ? "active" : ""}`}
             onClick={() => setGlobalCollapsed((v) => !v)}
@@ -2119,15 +2248,15 @@ export default function App() {
           >
             注释
           </button>
-          <button
-            className="theme-toggle"
-            onClick={() => setSetting("theme", effectiveTheme === "dark" ? "light" : "dark")}
-            title="切换浅色/深色主题(设置中可选跟随系统)"
-          >
-            {effectiveTheme === "dark" ? "DARK" : "LIGHT"}
-          </button>
-        </div>
-      )}
+        )}
+        <button
+          className="theme-toggle"
+          onClick={() => setSetting("theme", effectiveTheme === "dark" ? "light" : "dark")}
+          title="切换浅色/深色主题(设置中可选跟随系统)"
+        >
+          {effectiveTheme === "dark" ? "DARK" : "LIGHT"}
+        </button>
+      </div>
     </div>
   );
 }

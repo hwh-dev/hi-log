@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState } from "react";
 import PinsAggregate, { type FilePinsBlock } from "./PinsAggregate";
 import NotesPanel, { type FileNotesBlock } from "./NotesPanel";
-import type { Pin, PinGroup } from "./PinsPanel";
+import type { Pin, PinGroup } from "../utils/types";
 import type { Mark } from "../utils/palette";
 import { useSettings } from "../utils/settings";
 

@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import type { Pin, PinGroup } from "./PinsPanel";
+import type { Pin, PinGroup } from "../utils/types";
 import { useSettings, setSetting, type PinsSortSetting } from "../utils/settings";
 
 /** 单个文件的固定数据块(侧栏聚合用;groups 字段保留兼容旧数据,UI 不再分组) */

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FilterView, { type SearchSession } from "./FilterView";
 import ContextMenu from "./ContextMenu";
 import PromptModal, { type PromptConfig } from "./PromptModal";
-import type { Pin, PinGroup } from "./PinsPanel";
+import type { Pin, PinGroup } from "../utils/types";
 import type { Mark } from "../utils/palette";
 
 interface HitPayload {
@@ -47,6 +47,8 @@ export default function FilterPopout() {
   const [lineCache, setLineCache] = useState<LineCache>({});
   const [marks, setMarks] = useState<MarkMap>({});
   const [pins, setPins] = useState<Pin[]>([]);
+  /** 固定行号集合:传给 FilterView 渲染书签圆点(与主窗口一致) */
+  const pinSet = useMemo(() => new Set(pins.map((p) => p.line_no)), [pins]);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; lineNo: number } | null>(null);
   const [promptCfg, setPromptCfg] = useState<PromptConfig | null>(null);
   const fileIdRef = useRef<string | null>(null);
@@ -335,6 +337,7 @@ export default function FilterPopout() {
           lineCache={lineCache}
           highlightMap={active?.highlightMap ?? {}}
           marks={marks}
+          pins={pinSet}
           fetchLines={fetchLines}
           onJump={jump}
           onContextMenu={(lineNo, x, y) => setCtxMenu({ lineNo, x, y })}
@@ -358,6 +361,10 @@ export default function FilterPopout() {
             onClear={() => {
               const m = marks[ctxMenu.lineNo];
               if (m) void removeMarkAction(m.id);
+            }}
+            onCopyLine={() => {
+              void navigator.clipboard.writeText(lineCache[ctxMenu.lineNo] ?? "").catch(() => {});
+              setCtxMenu(null);
             }}
             pinned={!!pinned}
             onTogglePin={

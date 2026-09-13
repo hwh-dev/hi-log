@@ -498,24 +498,43 @@ export function removeRecentFile(path: string): string[] {
   return next;
 }
 
-/** 搜索历史:兼容旧格式 [{q,regex,caseSensitive}](仅取词)与新格式 string[] */
-export function loadSearchHistory(): string[] {
+/** 一条搜索历史:词 + 当时的选项(选历史项时要连选项一起还原) */
+export interface SearchHistoryEntry {
+  q: string;
+  regex: boolean;
+  caseSensitive: boolean;
+}
+
+/** 搜索历史:兼容旧的 string[] 格式(选项按默认 false 补齐) */
+export function loadSearchHistory(): SearchHistoryEntry[] {
   try {
     const v = JSON.parse(localStorage.getItem("hi-log.search-history") ?? "[]");
     if (!Array.isArray(v)) return [];
     return v
-      .map((h) => (typeof h === "string" ? h : typeof h?.q === "string" ? h.q : ""))
-      .filter(Boolean);
+      .map((h): SearchHistoryEntry | null => {
+        if (typeof h === "string") return { q: h, regex: false, caseSensitive: false };
+        if (typeof h?.q !== "string" || !h.q) return null;
+        return { q: h.q, regex: !!h.regex, caseSensitive: !!h.caseSensitive };
+      })
+      .filter((h): h is SearchHistoryEntry => h !== null);
   } catch {
     return [];
   }
 }
-export function saveSearchHistory(list: string[]) {
+export function saveSearchHistory(list: SearchHistoryEntry[]) {
   localStorage.setItem("hi-log.search-history", JSON.stringify(list));
 }
-/** 记录一次搜索词(去重置顶,截断到 max);返回新列表 */
-export function recordSearchHistory(q: string, max: number): string[] {
-  const next = [q, ...loadSearchHistory().filter((x) => x !== q)].slice(0, max);
+/** 记录一次搜索(同词同选项去重置顶,截断到 max);返回新列表 */
+export function recordSearchHistory(
+  q: string,
+  regex: boolean,
+  caseSensitive: boolean,
+  max: number,
+): SearchHistoryEntry[] {
+  const rest = loadSearchHistory().filter(
+    (x) => !(x.q === q && x.regex === regex && x.caseSensitive === caseSensitive),
+  );
+  const next = [{ q, regex, caseSensitive }, ...rest].slice(0, max);
   saveSearchHistory(next);
   return next;
 }
