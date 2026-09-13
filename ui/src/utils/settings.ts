@@ -41,6 +41,8 @@ export interface AppSettings {
   // 搜索
   regexDefault: boolean;
   caseDefault: boolean;
+  /** 整词默认开关(与上面两个对称,否则重启后整词会单独丢失) */
+  wholeWordDefault: boolean;
   /** 上下文 ±N 行(0 = 关闭) */
   contextLines: number;
   searchHistoryMax: number;
@@ -80,6 +82,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showNotes: true,
   regexDefault: false,
   caseDefault: false,
+  wholeWordDefault: false,
   contextLines: 0,
   searchHistoryMax: 50,
   openTailMode: false,
@@ -160,6 +163,11 @@ const SCHEMA: { [K in keyof AppSettings]: SettingDef<AppSettings[K]> } = {
   },
   caseDefault: {
     key: "hi-log.case-default",
+    def: false,
+    parse: (r) => r === "true",
+  },
+  wholeWordDefault: {
+    key: "hi-log.whole-word-default",
     def: false,
     parse: (r) => r === "true",
   },
@@ -503,18 +511,30 @@ export interface SearchHistoryEntry {
   q: string;
   regex: boolean;
   caseSensitive: boolean;
+  /** 整词(旧数据按 false 补齐) */
+  wholeWord: boolean;
+  /** 排除词(旧数据按空补齐) */
+  exclude: string;
 }
 
-/** 搜索历史:兼容旧的 string[] 格式(选项按默认 false 补齐) */
+/** 搜索历史:兼容旧的 string[] 与缺字段条目(选项按默认补齐) */
 export function loadSearchHistory(): SearchHistoryEntry[] {
   try {
     const v = JSON.parse(localStorage.getItem("hi-log.search-history") ?? "[]");
     if (!Array.isArray(v)) return [];
     return v
       .map((h): SearchHistoryEntry | null => {
-        if (typeof h === "string") return { q: h, regex: false, caseSensitive: false };
+        if (typeof h === "string") {
+          return { q: h, regex: false, caseSensitive: false, wholeWord: false, exclude: "" };
+        }
         if (typeof h?.q !== "string" || !h.q) return null;
-        return { q: h.q, regex: !!h.regex, caseSensitive: !!h.caseSensitive };
+        return {
+          q: h.q,
+          regex: !!h.regex,
+          caseSensitive: !!h.caseSensitive,
+          wholeWord: !!h.wholeWord,
+          exclude: typeof h.exclude === "string" ? h.exclude : "",
+        };
       })
       .filter((h): h is SearchHistoryEntry => h !== null);
   } catch {
@@ -524,17 +544,24 @@ export function loadSearchHistory(): SearchHistoryEntry[] {
 export function saveSearchHistory(list: SearchHistoryEntry[]) {
   localStorage.setItem("hi-log.search-history", JSON.stringify(list));
 }
-/** 记录一次搜索(同词同选项去重置顶,截断到 max);返回新列表 */
+/** 记录一次搜索(同词同**全部选项**去重置顶,截断到 max);返回新列表。
+    去重键必须含整词/排除词,否则"同词不同排除"会被错误合并成一条。 */
 export function recordSearchHistory(
-  q: string,
-  regex: boolean,
-  caseSensitive: boolean,
+  entry: Omit<SearchHistoryEntry, never>,
   max: number,
 ): SearchHistoryEntry[] {
+  const { q, regex, caseSensitive, wholeWord, exclude } = entry;
   const rest = loadSearchHistory().filter(
-    (x) => !(x.q === q && x.regex === regex && x.caseSensitive === caseSensitive),
+    (x) =>
+      !(
+        x.q === q &&
+        x.regex === regex &&
+        x.caseSensitive === caseSensitive &&
+        x.wholeWord === wholeWord &&
+        x.exclude === exclude
+      ),
   );
-  const next = [{ q, regex, caseSensitive }, ...rest].slice(0, max);
+  const next = [{ q, regex, caseSensitive, wholeWord, exclude }, ...rest].slice(0, max);
   saveSearchHistory(next);
   return next;
 }

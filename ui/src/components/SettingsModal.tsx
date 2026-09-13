@@ -443,6 +443,9 @@ export default function SettingsModal({ onClose }: Props) {
             <Row label="默认区分大小写" desc="新搜索默认勾选 Aa">
               <Toggle checked={s.caseDefault} onChange={(v) => set("caseDefault", v)} />
             </Row>
+            <Row label="默认整词匹配" desc="新搜索默认勾选 \b(词边界按 ASCII 定义)">
+              <Toggle checked={s.wholeWordDefault} onChange={(v) => set("wholeWordDefault", v)} />
+            </Row>
             <Row label="上下文行数" desc="命中行前后各显示 ±N 行,0 = 关闭">
               <Stepper value={s.contextLines} min={0} max={10} step={1} unit=" 行" onChange={(v) => set("contextLines", v)} />
             </Row>

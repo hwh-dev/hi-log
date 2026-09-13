@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   expandContext,
+  loadSearchHistory,
   loadSettings,
+  recordSearchHistory,
   resolveTheme,
   rowHeight,
   setSetting,
@@ -122,5 +124,48 @@ describe("setSetting", () => {
     setSetting("themeStyle", "glass", { silent: true });
     expect(document.documentElement.dataset.themeStyle).toBe("glass");
     setSetting("themeStyle", "solid", { silent: true }); // 恢复,避免污染其它用例
+  });
+});
+
+describe("搜索历史", () => {
+  const E = { q: "ERROR", regex: false, caseSensitive: false, wholeWord: false, exclude: "" };
+
+  it("兼容旧 string[] 格式,新字段补默认", () => {
+    localStorage.setItem("hi-log.search-history", JSON.stringify(["INFO", "WARN"]));
+    expect(loadSearchHistory()).toEqual([
+      { q: "INFO", regex: false, caseSensitive: false, wholeWord: false, exclude: "" },
+      { q: "WARN", regex: false, caseSensitive: false, wholeWord: false, exclude: "" },
+    ]);
+  });
+
+  it("缺字段的旧条目按默认补齐,整词/排除词还原", () => {
+    localStorage.setItem(
+      "hi-log.search-history",
+      JSON.stringify([{ q: "a", regex: true, caseSensitive: true }, { q: "b", wholeWord: true, exclude: "dbg" }]),
+    );
+    const h = loadSearchHistory();
+    expect(h[0]).toEqual({ q: "a", regex: true, caseSensitive: true, wholeWord: false, exclude: "" });
+    expect(h[1]).toEqual({ q: "b", regex: false, caseSensitive: false, wholeWord: true, exclude: "dbg" });
+  });
+
+  it("去重键含整词与排除词:同词不同排除是两条", () => {
+    recordSearchHistory({ ...E, exclude: "timeout" }, 50);
+    recordSearchHistory({ ...E, exclude: "debug" }, 50);
+    recordSearchHistory({ ...E, exclude: "timeout" }, 50); // 同词同选项 → 去重置顶
+    const h = loadSearchHistory();
+    expect(h).toHaveLength(2);
+    expect(h[0].exclude).toBe("timeout");
+    expect(h[1].exclude).toBe("debug");
+  });
+
+  it("整词不同的同词条目也各占一条", () => {
+    recordSearchHistory(E, 50);
+    recordSearchHistory({ ...E, wholeWord: true }, 50);
+    expect(loadSearchHistory()).toHaveLength(2);
+  });
+
+  it("超过上限截断", () => {
+    for (let i = 0; i < 5; i++) recordSearchHistory({ ...E, q: `w${i}` }, 3);
+    expect(loadSearchHistory()).toHaveLength(3);
   });
 });

@@ -6,6 +6,7 @@ import {
   clearSearchHistory,
   type SearchHistoryEntry,
 } from "../utils/settings";
+import { searchFlagsLabel, type SearchFlags, type SearchSpec } from "../utils/search";
 
 interface Props {
   query: string;
@@ -14,6 +15,11 @@ interface Props {
   setRegex: (v: boolean) => void;
   caseSensitive: boolean;
   setCaseSensitive: (v: boolean) => void;
+  wholeWord: boolean;
+  setWholeWord: (v: boolean) => void;
+  /** 排除词(NOT):命中的行里再滤掉含它的 */
+  exclude: string;
+  setExclude: (v: string) => void;
   running: boolean;
   /** 手动触发搜索(回车或点 Search) */
   onSearch: () => void;
@@ -28,8 +34,8 @@ interface Props {
   onPrevHit?: () => void;
   onNextHit?: () => void;
   hasHits?: boolean;
-  /** 按给定词立即搜索(历史点击/上下键选择时用当前选项) */
-  onApplyQuery: (q: string, regex: boolean, caseSensitive: boolean) => void;
+  /** 按给定检索式立即搜索(历史点击/上下键选择时,连选项一起还原) */
+  onApplyQuery: (spec: SearchSpec) => void;
   /** 外部聚焦引用(快捷键 Ctrl+F 聚焦搜索栏) */
   inputRef?: Ref<HTMLInputElement>;
 }
@@ -59,6 +65,10 @@ export default function SearchBar({
   setRegex,
   caseSensitive,
   setCaseSensitive,
+  wholeWord,
+  setWholeWord,
+  exclude,
+  setExclude,
   running,
   onSearch,
   onStop,
@@ -91,11 +101,32 @@ export default function SearchBar({
   const [browsing, setBrowsing] = useState(false);
   const browseRef = useRef<SearchHistoryEntry[]>([]);
 
-  // 记录一次搜索:同词同选项去重置顶;上限走设置(searchHistoryMax)
-  const recordHistory = (q: string, r = regex, cs = caseSensitive) => {
-    if (!q.trim()) return;
-    setHistory(recordSearchHistory(q, r, cs, getSettings().searchHistoryMax));
+  /**
+   * 排除框:平时收起成一个 ⊘ 按钮,点开才出现输入框(搜索栏横向空间紧张)。
+   * 已排除词非空时保持展开 —— 否则"看不见的过滤"会让结果莫名其妙变少。
+   */
+  const [excludeOpen, setExcludeOpen] = useState(false);
+  const excludeRef = useRef<HTMLInputElement>(null);
+  const showExclude = excludeOpen || exclude.length > 0;
+
+  const openExclude = () => {
+    setExcludeOpen(true);
+    // DOM 在这次点击后更新,下一帧把焦点交给排除框
+    requestAnimationFrame(() => excludeRef.current?.focus());
   };
+  /** 收起即清空:留着会在看不见的地方继续过滤 */
+  const closeExclude = () => {
+    setExclude("");
+    setExcludeOpen(false);
+  };
+
+  // 记录一次搜索:同词同**全部选项**去重置顶;上限走设置(searchHistoryMax)
+  const recordHistory = (q: string, f: SearchFlags) => {
+    if (!q.trim()) return;
+    setHistory(recordSearchHistory({ q, ...f }, getSettings().searchHistoryMax));
+  };
+  /** 当前搜索栏的选项(记录历史/发起搜索时用) */
+  const flags: SearchFlags = { regex, caseSensitive, wholeWord, exclude };
 
   // 实时候选:输入非空 → 前缀匹配优先、其次包含;空输入 → 全部历史
   const filtered = useMemo(() => {
@@ -132,16 +163,24 @@ export default function SearchBar({
     }
   };
 
-  /** 选中一项:连**当时的选项**一起还原(否则 .* 开关与 Aa 状态与历史词不匹配,
+  /** 选中一项:连**当时的选项**一起还原(否则开关状态与历史词不匹配,
       同一句正则用不同开关搜出来的结果天差地别) */
   const pickAndSearch = (h: SearchHistoryEntry) => {
     setQuery(h.q);
     setRegex(h.regex);
     setCaseSensitive(h.caseSensitive);
+    setWholeWord(h.wholeWord);
+    setExclude(h.exclude);
     setSuggestOpen(false);
     setBrowsing(false);
-    recordHistory(h.q, h.regex, h.caseSensitive);
-    onApplyQuery(h.q, h.regex, h.caseSensitive);
+    recordHistory(h.q, h);
+    onApplyQuery({
+      query: h.q,
+      regex: h.regex,
+      caseSensitive: h.caseSensitive,
+      wholeWord: h.wholeWord,
+      exclude: h.exclude,
+    });
   };
 
   return (
@@ -190,7 +229,7 @@ export default function SearchBar({
               if (suggestOpen && hi >= 0 && list[hi]) {
                 pickAndSearch(list[hi]);
               } else {
-                recordHistory(query);
+                recordHistory(query, flags);
                 setSuggestOpen(false);
                 setBrowsing(false);
                 onSearch();
@@ -223,7 +262,7 @@ export default function SearchBar({
           >
             {list.map((h, i) => (
               <div
-                key={`${h.q}|${h.regex ? 1 : 0}${h.caseSensitive ? 1 : 0}`}
+                key={`${h.q}|${h.regex ? 1 : 0}${h.caseSensitive ? 1 : 0}|${h.wholeWord ? 1 : 0}|${h.exclude}`}
                 className={`suggest-item ${i === hi ? "active" : ""}`}
                 onMouseEnter={() => {
                   // 悬停视作浏览:Enter 才带上该历史词;输入框保持原文
@@ -239,9 +278,8 @@ export default function SearchBar({
                   <HighlightMatch text={h.q} match={browsing ? "" : query} />
                 </span>
                 {/* 历史项的选项旗标:选中时会一并还原,先让用户看见 */}
-                <span className="suggest-flags">
-                  {h.regex ? ".*" : ""}
-                  {h.caseSensitive ? "Aa" : ""}
+                <span className="suggest-flags" title={searchFlagsLabel(h)}>
+                  {searchFlagsLabel(h)}
                 </span>
               </div>
             ))}
@@ -273,6 +311,54 @@ export default function SearchBar({
       >
         Aa
       </button>
+      <button
+        className={`toggle ${wholeWord ? "active" : ""}`}
+        title="整词匹配:err 不再命中 error / errno。词边界按 ASCII 定义,中文旁的 ASCII 数字字母算词内(错误500 不算整词)"
+        onClick={() => setWholeWord(!wholeWord)}
+      >
+        {"\\b"}
+      </button>
+
+      {/* 排除词(NOT):收起时一个 ⊘ 按钮,点开才占地方 */}
+      {showExclude ? (
+        <div className="search-input-wrap exclude-wrap">
+          <span className="exclude-icon" aria-hidden>⊘</span>
+          <input
+            className="search-input exclude-input"
+            ref={excludeRef}
+            value={exclude}
+            onChange={(e) => setExclude(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                recordHistory(query, flags);
+                setSuggestOpen(false);
+                setBrowsing(false);
+                onSearch();
+              } else if (e.key === "Escape") {
+                closeExclude();
+              }
+            }}
+            placeholder="排除…"
+            title="排除词:命中的行里再滤掉含它的(主词 ERROR + 排除 expected)"
+            spellCheck={false}
+          />
+          <button
+            className="exclude-clear"
+            title="清除并收起(与其它开关一致,下次搜索才生效)"
+            onClick={closeExclude}
+          >
+            ×
+          </button>
+        </div>
+      ) : (
+        <button
+          className="toggle exclude-toggle"
+          title="排除词(NOT):命中的行里再滤掉含它的"
+          onClick={openExclude}
+        >
+          ⊘
+        </button>
+      )}
 
       {/* klogg 式:跳转上一个/下一个命中 */}
       {onPrevHit && (
@@ -306,7 +392,7 @@ export default function SearchBar({
           <button
             className="search-go"
             onClick={() => {
-              recordHistory(query);
+              recordHistory(query, flags);
               setSuggestOpen(false);
               setBrowsing(false);
               onSearch();

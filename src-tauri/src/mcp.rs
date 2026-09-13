@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use hi_log_core::document::Document;
 use hi_log_core::marks::MarkStore;
-use hi_log_core::search::{search as core_search, SearchOptions};
+use hi_log_core::search::{search as core_search, SearchQuery};
 use serde_json::{json, Value};
 
 /// 应用数据目录(与 Tauri 的 app_data_dir 一致):%APPDATA%/{identifier} 等。
@@ -110,7 +110,9 @@ hi-log MCP:分析日志文件并在 GUI 中留下标记。
 
 注意:
 - 行号为 1-based;mark_line 的 color 取 0-7(4=蓝);备注建议说明为什么标记这一行。
-- 已打开多个文件时,操作前最好显式传 file_id,避免误作用到别的文件。";
+- 已打开多个文件时,操作前最好显式传 file_id,避免误作用到别的文件。
+- search 支持 exclude(排除词:命中的行里再滤掉含它的,如 query=ERROR & exclude=expected)
+  与 whole_word(整词);正则写错会直接报错,不会静默按子串搜。";
 
 /// 工具定义(供 tools/list)
 fn tool_defs() -> Value {
@@ -124,12 +126,14 @@ fn tool_defs() -> Value {
         },
         {
             "name": "search",
-            "description": "全文检索指定文件(缺省最近打开的);返回命中行号(可带行内容)",
+            "description": "全文检索指定文件(缺省最近打开的);返回命中行号(可带行内容)。可用 exclude 做排除(命中的行里再滤掉含它的),用 whole_word 只匹配整词",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string", "description": "检索词(默认子串,不区分大小写)" },
                 "file_id": { "type": "string", "description": "open_file 返回的文件路径;缺省=最近打开" },
-                "regex": { "type": "boolean", "description": "按正则匹配" },
+                "regex": { "type": "boolean", "description": "按正则匹配(非法正则会报错,不再静默按子串处理)" },
                 "case_sensitive": { "type": "boolean" },
+                "whole_word": { "type": "boolean", "description": "整词匹配(词边界按 ASCII 定义)" },
+                "exclude": { "type": "string", "description": "排除词:命中的行里再滤掉含它的(如 query=ERROR、exclude=expected)" },
                 "with_content": { "type": "boolean", "description": "同时返回命中行内容(默认 true)" },
                 "max_hits": { "type": "integer", "description": "命中上限(默认 1000)" }
             }, "required": ["query"] }
@@ -245,15 +249,19 @@ fn call_tool(state: &mut McpState, name: &str, args: &Value) -> Result<String, S
                 return Err("query required".into());
             }
             let doc = state.doc_for(fid_arg)?;
-            let opts = SearchOptions {
+            // 与 GUI 共用同一个选项转换点(手写平行构造过一次,MCP 与界面行为就分叉了)
+            let opts = crate::SearchOpts {
                 regex: b("regex", false),
                 case_sensitive: b("case_sensitive", false),
-                max_hits: i("max_hits", 1000) as usize,
+                whole_word: b("whole_word", false),
+                exclude: s("exclude"),
             };
+            let core_opts = crate::core_search_opts(&opts, i("max_hits", 1000) as usize);
+            let compiled = SearchQuery::compile(&query, &opts.exclude, &core_opts)?;
             let with_content = b("with_content", true);
             let t0 = std::time::Instant::now();
             let mut hits: Vec<Value> = Vec::new();
-            let stats = core_search(&doc, &query, &opts, &std::sync::atomic::AtomicBool::new(false),
+            let stats = core_search(&doc, &compiled, &std::sync::atomic::AtomicBool::new(false),
                 |hit| {
                     let mut v = json!({ "line_no": hit.line_no + 1 });
                     if with_content {
@@ -412,6 +420,54 @@ mod tests {
         for want in ["open_file", "search", "get_lines", "mark_line", "list_marks", "pin_line"] {
             assert!(names.contains(&want), "missing tool {want}");
         }
+        // search 的新能力要出现在 schema 里,否则 AI 根本不知道有排除/整词
+        let search = tools
+            .iter()
+            .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("search"))
+            .unwrap();
+        let props = &search["inputSchema"]["properties"];
+        assert!(props.get("exclude").is_some(), "schema 缺 exclude");
+        assert!(props.get("whole_word").is_some(), "schema 缺 whole_word");
+    }
+
+    #[test]
+    fn search_supports_exclude_and_whole_word() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.log");
+        std::fs::write(&path, "OOM again\nOOM at line 2\noomx\n").unwrap();
+        let mut s = empty_state();
+        call_text(&mut s, "open_file", json!({ "path": path.to_string_lossy() }));
+
+        let count = |s: &mut McpState, args: Value| -> (i64, Value) {
+            let t = call_text(s, "search", args);
+            let v: Value = serde_json::from_str(&t).unwrap();
+            (v["hit_count"].as_i64().unwrap(), v)
+        };
+
+        assert_eq!(count(&mut s, json!({ "query": "oom" })).0, 3);
+        // 排除:OOM 但不要 again 那行
+        let (n, v) = count(&mut s, json!({ "query": "oom", "exclude": "again" }));
+        assert_eq!(n, 2);
+        assert_eq!(v["hits"][0]["line_no"], 2);
+        // 整词:oomx 不再算命中
+        assert_eq!(count(&mut s, json!({ "query": "oom", "whole_word": true })).0, 2);
+        // 两者叠加
+        let (n, v) = count(&mut s, json!({ "query": "oom", "whole_word": true, "exclude": "again" }));
+        assert_eq!(n, 1);
+        assert_eq!(v["hits"][0]["line_no"], 2);
+    }
+
+    #[test]
+    fn search_invalid_regex_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.log");
+        std::fs::write(&path, "foo ( bar\nfoo\n").unwrap();
+        let mut s = empty_state();
+        call_text(&mut s, "open_file", json!({ "path": path.to_string_lossy() }));
+        // 改动前:静默按子串返回 1 条命中,AI 会据此得出错误结论
+        let t = call_text(&mut s, "search", json!({ "query": "(", "regex": true }));
+        assert!(t.starts_with("error:"), "got {t}");
+        assert!(t.contains("主查询"), "got {t}");
     }
 
     #[test]

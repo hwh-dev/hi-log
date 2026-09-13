@@ -18,6 +18,7 @@ import SettingsModal from "./components/SettingsModal";
 import { registerCommand, initCommandDispatcher } from "./utils/commands";
 import type { Update } from "@tauri-apps/plugin-updater";
 import type { Mark } from "./utils/palette";
+import { buildSearchOpts, sameSearchSpec, type SearchSpec } from "./utils/search";
 import {
   getSettings,
   setSetting,
@@ -71,11 +72,8 @@ interface SearchDonePayload {
 }
 
 /** 一次搜索的完整结果会话(Notepad++ Search Results 风格,多会话并存可对比) */
-interface SearchSession {
+interface SearchSession extends SearchSpec {
   id: number; // 即后端 search_id
-  query: string;
-  regex: boolean;
-  caseSensitive: boolean;
   hitCount: number;
   truncated: boolean;
   /** 该会话的命中高亮(LogView/FilterView 渲染用) */
@@ -232,6 +230,9 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [regex, setRegex] = useState(() => getSettings().regexDefault);
   const [caseSensitive, setCaseSensitive] = useState(() => getSettings().caseDefault);
+  const [wholeWord, setWholeWord] = useState(() => getSettings().wholeWordDefault);
+  /** 排除词(NOT):命中的行里再滤掉含它的 */
+  const [exclude, setExclude] = useState("");
   /** tail 模式:文件追加自动加载 + 视口跟随 + 激活搜索自动重扫 */
   const [tailMode, setTailMode] = useState(false);
   /** 备注注释:是否显示(设置里完全屏蔽);状态栏按钮是"全局折叠"开关 */
@@ -260,10 +261,9 @@ export default function App() {
   const tailReplaceRef = useRef<number | null>(null);
   /** 当前搜索是否在跑(running 的 ref 镜像,runSearch 幂等判断用) */
   const runningRef = useRef(false);
-  /** 最近一次发起的搜索参数(幂等判断用) */
-  const lastQueryRef = useRef("");
-  const lastRegexRef = useRef(false);
-  const lastCaseRef = useRef(false);
+  /** 最近一次发起的搜索(幂等判断用)。存整份 spec 而不是逐字段的 ref:
+      每加一个选项就要多一个 ref、多一处比较,漏一个就会误判为"同一次搜索" */
+  const lastSpecRef = useRef<SearchSpec | null>(null);
   // 搜索命中累积缓冲:80ms 节流合并 setState,避免高命中时 O(n) 拷贝撑爆主线程
   const pendingHitsRef = useRef<{ search_id: number; line_no: number; ranges: [number, number][] }[]>([]);
   // 命中行文本缓存缓冲:与高亮/计数一起由 flushHits 合并,避免每 chunk 触发整树重渲染
@@ -1023,45 +1023,37 @@ export default function App() {
 
   // ── run search ──
   const runSearch = useCallback(
-    async (q: string, r: boolean, c: boolean) => {
+    async (spec: SearchSpec) => {
       // 搜索作用于焦点栏文件(点击哪栏搜哪栏)
       const fid = focusFileId;
       if (!fid) return;
       const fileSessions = filesRef.current[fid]?.sessions ?? [];
       // 同一查询已在跑:幂等跳过。否则每次 Enter 都会启动一次全新全量扫描,
       // 旧扫描线程继续发事件,造成计数虚高与 N 倍扫描耗时。
-      if (
-        runningRef.current &&
-        q === lastQueryRef.current &&
-        r === lastRegexRef.current &&
-        c === lastCaseRef.current
-      ) {
+      if (runningRef.current && lastSpecRef.current && sameSearchSpec(spec, lastSpecRef.current)) {
         return;
       }
       // 停止上一次搜索
       if (searchIdRef.current !== null) {
         await invoke("stop_search", { searchId: searchIdRef.current }).catch(() => {});
       }
-      if (!q.trim()) return; // 空查询不清会话,保留已有结果便于对比
+      if (!spec.query.trim()) return; // 空查询不清会话,保留已有结果便于对比
       tailReplaceRef.current = null; // 手动搜索取消待处理的 tail 替换
       runningRef.current = true;
-      lastQueryRef.current = q;
-      lastRegexRef.current = r;
-      lastCaseRef.current = c;
+      lastSpecRef.current = spec;
+      const clean: SearchSpec = { ...spec, exclude: spec.exclude.trim() };
       try {
         // 记录搜索归属文件:事件(chunk/progress/done)按此路由到对应 FileState
         searchFileRef.current = fid;
         const id = await invoke<number>("start_search", {
           fileId: fid,
-          query: q,
-          opts: { regex: r, caseSensitive: c },
+          query: clean.query,
+          opts: buildSearchOpts(clean),
         });
         searchIdRef.current = id;
-        // 相同查询(词+正则+大小写一致)的既有会话:复用刷新,而非新建。
+        // 相同检索式(词 + 四个选项全一致)的既有会话:复用刷新,而非新建。
         // 避免"搜了 INFO 又搜 INFO"无限开新窗口 —— 重复同词应刷新原结果。
-        const reuse = fileSessions.find(
-          (s) => !s.running && s.query === q && s.regex === r && s.caseSensitive === c,
-        );
+        const reuse = fileSessions.find((s) => !s.running && sameSearchSpec(s, clean));
 
         if (reuse) {
           // 把该会话重置为 running 态:清空旧命中并换上新 search_id,位置不变
@@ -1078,9 +1070,7 @@ export default function App() {
             [
               {
                 id,
-                query: q,
-                regex: r,
-                caseSensitive: c,
+                ...clean,
                 hitCount: 0,
                 truncated: false,
                 highlightMap: {},
@@ -1095,7 +1085,7 @@ export default function App() {
         // 通知命中弹窗:新搜索会话(词/选项一并带上);未打开不转发
         if (popoutOpenRef.current.filter) {
           void appWindow
-            .emitTo("filter-popout", "search_started", { search_id: id, query: q, regex: r, caseSensitive: c })
+            .emitTo("filter-popout", "search_started", { search_id: id, ...clean })
             .catch(() => {});
         }
       } catch (e) {
@@ -1110,16 +1100,18 @@ export default function App() {
 
   // 手动触发搜索:回车或点按钮(不做打字即搜)
   const doSearch = useCallback(() => {
-    void runSearch(query, regex, caseSensitive);
-  }, [query, regex, caseSensitive, runSearch]);
+    void runSearch({ query, regex, caseSensitive, wholeWord, exclude });
+  }, [query, regex, caseSensitive, wholeWord, exclude, runSearch]);
 
   // 应用搜索历史条目:恢复其选项并立即搜索
   const applyQuery = useCallback(
-    (q: string, r: boolean, c: boolean) => {
-      setQuery(q);
-      setRegex(r);
-      setCaseSensitive(c);
-      void runSearch(q, r, c);
+    (spec: SearchSpec) => {
+      setQuery(spec.query);
+      setRegex(spec.regex);
+      setCaseSensitive(spec.caseSensitive);
+      setWholeWord(spec.wholeWord);
+      setExclude(spec.exclude);
+      void runSearch(spec);
     },
     [runSearch],
   );
@@ -1255,6 +1247,8 @@ export default function App() {
         setQuery(target.query);
         setRegex(target.regex);
         setCaseSensitive(target.caseSensitive);
+        setWholeWord(target.wholeWord);
+        setExclude(target.exclude);
       }
       mutateFile(fid, (cur) => ({ ...cur, searchActiveId: id }));
       // 换会话 = 换结果集,两个光标都指向旧结果集的行,一并清掉
@@ -1364,6 +1358,8 @@ export default function App() {
         setQuery(target.query);
         setRegex(target.regex);
         setCaseSensitive(target.caseSensitive);
+        setWholeWord(target.wholeWord);
+        setExclude(target.exclude);
       }
       if (focusFileId)
         mutateFile(focusFileId, (cur) => ({ ...cur, searchActiveId: e.payload.search_id }));
@@ -1486,7 +1482,7 @@ export default function App() {
       const id = await invoke<number>("start_search", {
         fileId: meta.id,
         query: s.query,
-        opts: { regex: s.regex, caseSensitive: s.caseSensitive },
+        opts: buildSearchOpts(s),
       });
       searchIdRef.current = id;
       tailReplaceRef.current = s.id;
@@ -1674,7 +1670,7 @@ export default function App() {
         const n = await invoke<number>("export_hits", {
           fileId: fid,
           query: s.query,
-          opts: { regex: s.regex, caseSensitive: s.caseSensitive },
+          opts: buildSearchOpts(s),
           path: dest,
           context: getSettings().contextLines,
         });
@@ -1983,6 +1979,10 @@ export default function App() {
             setRegex={setRegex}
             caseSensitive={caseSensitive}
             setCaseSensitive={setCaseSensitive}
+            wholeWord={wholeWord}
+            setWholeWord={setWholeWord}
+            exclude={exclude}
+            setExclude={setExclude}
             running={focusSearchRunning}
             onSearch={doSearch}
             onStop={stopSearch}

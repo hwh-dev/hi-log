@@ -11,7 +11,7 @@ use hi_log_core::encoding::Encoding as CoreEncoding;
 use hi_log_core::marks::{
     Mark as CoreMark, MarkStore, Pin as CorePin, PinGroup as CorePinGroup,
 };
-use hi_log_core::search::{search as core_search, SearchOptions};
+use hi_log_core::search::{search as core_search, SearchOptions, SearchQuery};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -248,14 +248,22 @@ struct SearchOpts {
     regex: bool,
     #[serde(rename = "caseSensitive")]
     case_sensitive: bool,
+    /// 缺字段按 false/空处理:漏改一个 invoke 点不至于让整条命令反序列化失败
+    #[serde(rename = "wholeWord", default)]
+    whole_word: bool,
+    /// 排除词(NOT):命中的行里再滤掉含它的
+    #[serde(default)]
+    exclude: String,
 }
 
-/// UI/CLI 选项 → core 选项的**唯一**转换点(加搜索选项只改这里)
-fn core_search_opts(o: &SearchOpts) -> SearchOptions {
+/// UI/CLI/MCP 选项 → core 选项的**唯一**转换点(加搜索选项只改这里)。
+/// `max_hits` 由调用方给:GUI 1e6,MCP 1000。
+fn core_search_opts(o: &SearchOpts, max_hits: usize) -> SearchOptions {
     SearchOptions {
         regex: o.regex,
         case_sensitive: o.case_sensitive,
-        max_hits: 1_000_000,
+        whole_word: o.whole_word,
+        max_hits,
     }
 }
 
@@ -299,6 +307,10 @@ fn start_search(
         .cloned()
         .ok_or_else(|| "file not open".to_string())?;
 
+    // 先编译再取消旧任务:非法正则不该把正在跑的搜索打断
+    let core_opts = core_search_opts(&opts, 1_000_000);
+    let compiled = SearchQuery::compile(&query, &opts.exclude, &core_opts)?;
+
     // 强制单扫描:取消并清空所有旧任务。即使前端漏调 stop_search
     // (或竞态下旧线程已越过取消点),也保证同一时刻只有一个全量扫描在跑,
     // 避免 N 份扫描叠加把用户感知的耗时放大 N 倍。
@@ -315,15 +327,13 @@ fn start_search(
     let tasks = search_state.tasks.clone();
 
     std::thread::spawn(move || {
-        let core_opts = core_search_opts(&opts);
         let mut batch: Vec<HitPayload> = Vec::new();
         // 进度按时间节流(≥100ms 一次):避免每 4096 行的 emit 序列化+IPC
         // 把 6GB/s 的搜索线程拖慢、前端被海量 progress 事件刷爆重渲染
         let mut last_progress = Instant::now();
         let stats = core_search(
             &doc,
-            &query,
-            &core_opts,
+            &compiled,
             &cancel,
             |hit| {
                 batch.push(HitPayload {
@@ -410,6 +420,9 @@ fn export_hits(
     }
     let ctx = context.unwrap_or(0).min(50);
     let total = doc.line_count();
+    // 编译早于创建文件:非法正则不该把用户选定的文件清成 0 字节再报错
+    let core_opts = core_search_opts(&opts, 1_000_000);
+    let compiled = SearchQuery::compile(&query, &opts.exclude, &core_opts)?;
     let file = std::fs::File::create(&path).map_err(|e| format!("创建文件失败:{e}"))?;
     let mut out = std::io::BufWriter::new(file);
     let mut hits = 0usize;
@@ -417,11 +430,9 @@ fn export_hits(
     let mut last_written: Option<usize> = None;
     let mut write_err: Option<String> = None;
     let cancel = AtomicBool::new(false);
-    let core_opts = core_search_opts(&opts);
     core_search(
         &doc,
-        &query,
-        &core_opts,
+        &compiled,
         &cancel,
         |hit| {
             if write_err.is_some() {
@@ -945,7 +956,22 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_bg_ext;
+    use super::{valid_bg_ext, SearchOpts};
+
+    #[test]
+    fn search_opts_tolerates_missing_new_fields() {
+        // 非 Option 的 bool 缺字段会让整条命令反序列化失败 —— 前端 invoke 点漏改一个就中招
+        let o: SearchOpts = serde_json::from_str(r#"{"regex":true,"caseSensitive":false}"#).unwrap();
+        assert!(o.regex);
+        assert!(!o.whole_word);
+        assert!(o.exclude.is_empty());
+
+        let o: SearchOpts =
+            serde_json::from_str(r#"{"regex":false,"caseSensitive":true,"wholeWord":true,"exclude":"debug"}"#)
+                .unwrap();
+        assert!(o.whole_word);
+        assert_eq!(o.exclude, "debug");
+    }
 
     #[test]
     fn bg_ext_whitelist() {

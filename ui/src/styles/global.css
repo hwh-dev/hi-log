@@ -987,6 +987,50 @@ button {
   color: var(--accent);
 }
 
+/* ── 排除词(NOT):收起时是一个 ⊘ 按钮,展开后是输入框 + × 清除 ── */
+
+.exclude-wrap {
+  /* 不抢主输入框的宽度(flex:1);窄窗口下先压缩自己 */
+  flex: 0 1 170px;
+  min-width: 92px;
+}
+
+.exclude-input {
+  padding-left: 21px; /* 左侧留给 ⊘ 图标 */
+}
+
+.exclude-icon {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-dim);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.exclude-clear {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 5px;
+}
+
+.exclude-clear:hover {
+  color: var(--text-primary);
+}
+
+.exclude-toggle {
+  font-size: 11px;
+}
+
 /* ── 搜索历史联想(向上弹出,searchbar 位于窗口底部)── */
 
 .search-suggest {
@@ -1035,6 +1079,11 @@ button {
   margin-left: auto;
   color: var(--text-dim);
   font-size: 9px;
+  /* 排除词可能很长:截断而不是把整行撑开 */
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .suggest-clear {
@@ -1220,6 +1269,17 @@ mark {
 .chip-q {
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-flags {
+  flex-shrink: 0;
+  opacity: 0.7;
+  font-size: 9px;
+  /* 排除词可能很长:截断而不是把 chip 撑开 */
+  max-width: 96px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

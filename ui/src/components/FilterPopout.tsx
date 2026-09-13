@@ -7,6 +7,7 @@ import ContextMenu from "./ContextMenu";
 import PromptModal, { type PromptConfig } from "./PromptModal";
 import type { Pin, PinGroup } from "../utils/types";
 import type { Mark } from "../utils/palette";
+import type { SearchSpec } from "../utils/search";
 
 interface HitPayload {
   line_no: number;
@@ -147,7 +148,7 @@ export default function FilterPopout() {
     }).then((f) => un.push(f));
 
     // 主窗口发起新搜索 → 创建会话
-    listen<{ search_id: number; query: string; regex: boolean; caseSensitive: boolean }>(
+    listen<{ search_id: number } & SearchSpec>(
       "search_started",
       (e) => {
         setSessions((prev) => [
@@ -156,6 +157,8 @@ export default function FilterPopout() {
             query: e.payload.query,
             regex: e.payload.regex,
             caseSensitive: e.payload.caseSensitive,
+            wholeWord: e.payload.wholeWord,
+            exclude: e.payload.exclude,
             hitCount: 0,
             truncated: false,
             highlightMap: {},

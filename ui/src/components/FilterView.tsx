@@ -2,13 +2,11 @@ import { useRef, useState, useEffect, useMemo, useCallback, forwardRef, useImper
 import { highlightText } from "../utils/highlight";
 import { paletteColor, type Mark } from "../utils/palette";
 import { useSettings, getSettings, setSetting, expandContext } from "../utils/settings";
+import { searchFlagsLabel, type SearchSpec } from "../utils/search";
 
 /** 搜索会话(Notepad++ Search Results 风格,多会话并存) */
-export interface SearchSession {
+export interface SearchSession extends SearchSpec {
   id: number; // 后端 search_id
-  query: string;
-  regex: boolean;
-  caseSensitive: boolean;
   hitCount: number;
   truncated: boolean;
   highlightMap: Record<number, [number, number][]>;
@@ -232,12 +230,22 @@ const FilterView = forwardRef<FilterViewHandle, Props>(function FilterView(
 
   // 搜索跳转(‹›):命中列表跟随滚动到当前激活命中行(与文档视口联动)。
   // 固定行高:idx * rowHeight 直接换算,无换行累计,天然无空白。
+  //
+  // 只在目标行**不在视口内**时才滚(且落到 1/3 处,留出上下文):点击一条已经在
+  // 眼前的结果时也强制居中,会让整块列表从鼠标底下移走,手感像是点错了。
   useEffect(() => {
     if (activeHitLine == null) return;
     const idx = displayLines.indexOf(activeHitLine);
-    if (idx < 0 || !containerRef.current) return;
     const el = containerRef.current;
-    const top = Math.max(0, idx * rowHeight - el.clientHeight / 2);
+    if (idx < 0 || !el) return;
+    // 可见性判定要用**与渲染同一套**的锚定映射:行块局部是 1:1 布局,只在视口顶锚定
+    // (rowsShift = start*rowHeight − domToS(scrollTop) + scrollTop),所以屏幕上距视口顶的
+    // 距离 = 行逻辑偏移 − domToS(scrollTop)。拿 sToDom(...) 去比 scrollTop 是另一套整体
+    // 压缩映射,大文件下会把屏幕外的行判成"可见",于是点了不滚。
+    const viewTopLogical = domToS(el.scrollTop);
+    const relTop = idx * rowHeight - viewTopLogical;
+    if (relTop >= 0 && relTop + rowHeight <= el.clientHeight) return;
+    const top = Math.max(0, idx * rowHeight - el.clientHeight / 3);
     el.scrollTop = sToDom(top);
     setScrollTop(el.scrollTop);
   }, [activeHitLine, displayLines, rowHeight, sToDom]);
@@ -372,10 +380,14 @@ const FilterView = forwardRef<FilterViewHandle, Props>(function FilterView(
             <div
               key={s.id}
               className={`session-chip ${s.id === active?.id ? "active" : ""} ${s.running ? "running" : ""}`}
-              title={s.query}
+              title={[s.query, searchFlagsLabel(s)].filter(Boolean).join("  ")}
               onClick={() => onSelectSession(s.id)}
             >
               <span className="chip-q">{s.query}</span>
+              {/* 选项旗标:带排除/整词的会话命中数天生更少,不写出来用户无从解释 */}
+              {searchFlagsLabel(s) && (
+                <span className="chip-flags">{searchFlagsLabel(s)}</span>
+              )}
               <span className="chip-count">
                 {`${s.hitCount.toLocaleString()}${s.truncated ? "+" : ""}`}
               </span>
@@ -401,7 +413,7 @@ const FilterView = forwardRef<FilterViewHandle, Props>(function FilterView(
         {onExport && active && (
           <button
             className="panel-btn"
-            title={`把「${active.query}」的命中行导出为文本文件`}
+            title={`把「${[active.query, searchFlagsLabel(active)].filter(Boolean).join("  ")}」的命中行导出为文本文件`}
             onClick={() => onExport(active)}
           >
             导出
