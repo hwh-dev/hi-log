@@ -130,6 +130,27 @@ fn log_message(message: String, level: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// 关于信息:版本 + 关键路径(设置页「关于」区展示与一键复制)。
+/// 路径交给后端给,前端不猜 —— 与 GUI/MCP/CLI 三处共用同一份 app_data_dir。
+#[derive(serde::Serialize)]
+struct AppInfo {
+    version: String,
+    data_dir: String,
+    db_path: String,
+    log_path: String,
+}
+
+#[tauri::command]
+fn app_info() -> AppInfo {
+    let dir = mcp::app_data_dir();
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        db_path: dir.join("hi-log.db").to_string_lossy().into_owned(),
+        log_path: dir.join("hi-log.log").to_string_lossy().into_owned(),
+        data_dir: dir.to_string_lossy().into_owned(),
+    }
+}
+
 /// 背景图:校验扩展名 → 拷贝到 app_data_dir/background.<ext> → 返回绝对路径。
 /// 前端只存固定文件名(settings 的 hi-log.background),重选后覆盖同名文件。
 #[tauri::command]
@@ -229,6 +250,15 @@ struct SearchOpts {
     case_sensitive: bool,
 }
 
+/// UI/CLI 选项 → core 选项的**唯一**转换点(加搜索选项只改这里)
+fn core_search_opts(o: &SearchOpts) -> SearchOptions {
+    SearchOptions {
+        regex: o.regex,
+        case_sensitive: o.case_sensitive,
+        max_hits: 1_000_000,
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct HitPayload {
     line_no: usize, // 1-based
@@ -285,11 +315,7 @@ fn start_search(
     let tasks = search_state.tasks.clone();
 
     std::thread::spawn(move || {
-        let core_opts = SearchOptions {
-            regex: opts.regex,
-            case_sensitive: opts.case_sensitive,
-            max_hits: 1_000_000,
-        };
+        let core_opts = core_search_opts(&opts);
         let mut batch: Vec<HitPayload> = Vec::new();
         // 进度按时间节流(≥100ms 一次):避免每 4096 行的 emit 序列化+IPC
         // 把 6GB/s 的搜索线程拖慢、前端被海量 progress 事件刷爆重渲染
@@ -358,6 +384,72 @@ fn stop_search(search_state: State<SearchState>, search_id: u32) {
     if let Some(cancel) = search_state.tasks.lock().unwrap_or_else(|e| e.into_inner()).get(&search_id) {
         cancel.store(true, Ordering::Relaxed);
     }
+}
+
+/// 把当前检索命中的行导出为文本文件(可选 ±context 行上下文)。
+/// **后端重扫**而不是从前端的 lineCache 导出:前端只缓存看过的行,
+/// 大文件导出必然残缺;重扫一遍 465MB 只要几百毫秒。
+/// 返回写入的命中条数。
+#[tauri::command]
+fn export_hits(
+    state: State<AppState>,
+    file_id: String,
+    query: String,
+    opts: SearchOpts,
+    path: String,
+    context: Option<usize>,
+) -> Result<usize, String> {
+    let doc = state
+        .documents
+        .lock().unwrap_or_else(|e| e.into_inner())
+        .get(&file_id)
+        .cloned()
+        .ok_or_else(|| "file not open".to_string())?;
+    if query.is_empty() {
+        return Err("查询为空".into());
+    }
+    let ctx = context.unwrap_or(0).min(50);
+    let total = doc.line_count();
+    let file = std::fs::File::create(&path).map_err(|e| format!("创建文件失败:{e}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    let mut hits = 0usize;
+    // 上下文重叠时只写未写出的部分,避免同一行重复
+    let mut last_written: Option<usize> = None;
+    let mut write_err: Option<String> = None;
+    let cancel = AtomicBool::new(false);
+    let core_opts = core_search_opts(&opts);
+    core_search(
+        &doc,
+        &query,
+        &core_opts,
+        &cancel,
+        |hit| {
+            if write_err.is_some() {
+                return;
+            }
+            let start = hit.line_no.saturating_sub(ctx);
+            let end = (hit.line_no + ctx).min(total.saturating_sub(1));
+            let from = match last_written {
+                Some(l) if start <= l => l + 1,
+                _ => start,
+            };
+            for no in from..=end {
+                let Some(text) = doc.line_string(no) else { break };
+                if let Err(e) = writeln!(out, "{text}") {
+                    write_err = Some(format!("写入失败:{e}"));
+                    return;
+                }
+            }
+            last_written = Some(end);
+            hits += 1;
+        },
+        |_, _| {},
+    );
+    if let Some(e) = write_err {
+        return Err(e);
+    }
+    out.flush().map_err(|e| format!("落盘失败:{e}"))?;
+    Ok(hits)
 }
 
 // ── 标记 ──
@@ -472,6 +564,8 @@ struct PinPayload {
     group_id: Option<i64>,
     /// 自定义名称(可空)
     name: String,
+    /// 组内序号:前端「手动排序」模式下的并列比较键,缺了会恒为 undefined
+    position: i64,
     created_at: i64,
 }
 
@@ -489,7 +583,7 @@ impl From<CorePinGroup> for PinGroupPayload {
 
 impl From<CorePin> for PinPayload {
     fn from(p: CorePin) -> Self {
-        PinPayload { id: p.id, line_no: p.line_no, group_id: p.group_id, name: p.name, created_at: p.created_at }
+        PinPayload { id: p.id, line_no: p.line_no, group_id: p.group_id, name: p.name, position: p.position, created_at: p.created_at }
     }
 }
 
@@ -552,86 +646,20 @@ fn list_pins(state: State<MarkState>, file_id: String) -> Result<PinListPayload,
         })
 }
 
-#[tauri::command]
-fn create_pin_group(
-    app: AppHandle,
-    state: State<MarkState>,
-    file_id: String,
-    name: String,
-) -> Result<PinGroupPayload, String> {
-    let g = state
-        .store
-        .lock().unwrap_or_else(|e| e.into_inner())
-        .create_pin_group(&file_id, &name)
-        .map_err(|e| e.to_string())?;
-    emit_pins_changed(&app);
-    Ok(g.into())
-}
-
-#[tauri::command]
-fn delete_pin_group(
-    app: AppHandle,
-    state: State<MarkState>,
-    file_id: String,
-    group_id: i64,
-) -> Result<(), String> {
-    state
-        .store
-        .lock().unwrap_or_else(|e| e.into_inner())
-        .delete_pin_group(&file_id, group_id)
-        .map_err(|e| e.to_string())?;
-    emit_pins_changed(&app);
-    Ok(())
-}
-
-/// 组内全量重排(拖拽排序后调用)
+/// 全量重排(侧栏拖拽排序后调用)。
+/// 不带分组:分组 UI 已撤销,固定全部在默认组,按数组下标写 position 即可 ——
+/// 以前要前端反查"首个有 group_id 的 pin"来猜组 id,数据一变就失效。
 #[tauri::command]
 fn reorder_pins(
     app: AppHandle,
     state: State<MarkState>,
     file_id: String,
-    group_id: i64,
     ids: Vec<i64>,
 ) -> Result<(), String> {
     state
         .store
         .lock().unwrap_or_else(|e| e.into_inner())
-        .reorder_pins(&file_id, group_id, &ids)
-        .map_err(|e| e.to_string())?;
-    emit_pins_changed(&app);
-    Ok(())
-}
-
-/// 分组全量重排(拖拽分组顺序后调用)
-#[tauri::command]
-fn reorder_pin_groups(
-    app: AppHandle,
-    state: State<MarkState>,
-    file_id: String,
-    ids: Vec<i64>,
-) -> Result<(), String> {
-    state
-        .store
-        .lock().unwrap_or_else(|e| e.into_inner())
-        .reorder_pin_groups(&file_id, &ids)
-        .map_err(|e| e.to_string())?;
-    emit_pins_changed(&app);
-    Ok(())
-}
-
-/// 跨组移动:移到目标组末尾
-#[tauri::command]
-fn move_pin_to_group(
-    app: AppHandle,
-    state: State<MarkState>,
-    pin_id: i64,
-    file_id: String,
-    group_id: i64,
-) -> Result<(), String> {
-    state
-        .store
-        .lock().unwrap_or_else(|e| e.into_inner())
-        .move_pin_to_group(pin_id, &file_id, group_id)
+        .reorder_pins(&file_id, &ids)
         .map_err(|e| e.to_string())?;
     emit_pins_changed(&app);
     Ok(())
@@ -897,6 +925,7 @@ fn main() {
             measure_wraps,
             start_search,
             stop_search,
+            export_hits,
             add_mark,
             update_mark,
             remove_mark,
@@ -905,13 +934,10 @@ fn main() {
             remove_pin,
             rename_pin,
             list_pins,
-            create_pin_group,
-            delete_pin_group,
             reorder_pins,
-            reorder_pin_groups,
-            move_pin_to_group,
             open_panel,
-            set_background_image
+            set_background_image,
+            app_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running hi-log");
